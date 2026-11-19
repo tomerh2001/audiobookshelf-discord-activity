@@ -143,7 +143,9 @@ export function createNativePlayer({ component: ctx, socket, baseUrl, presence, 
         audio = next;
         // A native player may already be audible when its Activity observer attaches.
         // Recover from actual media state, never from a requested play or queue state.
-        played = Boolean(audio && !audio.paused && !audio.ended && audio.readyState >= 2 && handler.playerPlaying);
+        // ABS retains PLAYING during a stall; HAVE_CURRENT_DATA alone is not
+        // enough when this observer also missed the element's waiting event.
+        played = Boolean(audio && !audio.paused && !audio.ended && audio.readyState >= 3 && handler.playerPlaying);
         buffering = false;
         if (audio) { audio.addEventListener('playing', onPlaying); audio.addEventListener('waiting', onWaiting); audio.addEventListener('loadedmetadata', onLoadedMetadata); }
     }

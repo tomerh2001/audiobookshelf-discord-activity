@@ -4,7 +4,7 @@ import { createRequire } from 'node:module';
 import { createNativePlayer } from '../src/nativePlaybackAdapter.js';
 const { JSDOM } = createRequire(new URL('../../apps/activity-web/package.json', import.meta.url))('jsdom');
 const flush = () => new Promise(resolve => setImmediate(resolve));
-function fixture({ getItem, finished = false, initialPlaying = false } = {}) {
+function fixture({ getItem, finished = false, initialPlaying = false, initialReadyState = 4 } = {}) {
     const { window } = new JSDOM('<body></body>', { url: 'https://activity.example/' });
     const previous = { window: globalThis.window, document: globalThis.document, fetch: globalThis.fetch };
     globalThis.window = window; globalThis.document = window.document;
@@ -18,7 +18,8 @@ function fixture({ getItem, finished = false, initialPlaying = false } = {}) {
             loads.push({ item, episodeId, playing, rate, time });
             handlers.libraryItemId = item.id; handlers.libraryItem = item; handlers.episodeId = episodeId; handlers.time = time;
             const audio = window.document.createElement('audio'); window.document.body.append(audio);
-            Object.defineProperty(audio, 'readyState', { value: 4 });
+            handlers.audioReadyState = initialReadyState;
+            Object.defineProperty(audio, 'readyState', { get: () => handlers.audioReadyState });
             handlers.audioPaused = !initialPlaying;
             Object.defineProperty(audio, 'paused', { get: () => handlers.audioPaused });
             audio.play = () => { events.push('element-play'); handlers.audioPaused = false; return Promise.resolve(); };
@@ -131,6 +132,21 @@ test('a missed playing event recovers actual audible playback; blocked autoplay 
             assert.equal(f.presences.length > 0, initialPlaying);
         } finally { f.close(); }
     }
+});
+test('late observation after a missed waiting event does not report a stalled element as playing', async () => {
+    const f = fixture({ initialPlaying: true, initialReadyState: 2 });
+    try {
+        await f.adapter.start(); await f.adapter.playSelection({ libraryItemId: 'book-one' }); await flush();
+        // The pinned ABS handler keeps PLAYING while the HTML element waits.
+        assert.equal(f.handlers.playerPlaying, true);
+        assert.equal(f.handlers.player.player.paused, false);
+        await new Promise(resolve => setTimeout(resolve, 1050));
+        assert.equal(f.presences.length, 0);
+        f.handlers.audioReadyState = 3; f.playing();
+        assert.equal(f.presences.at(-1)?.title, 'Book');
+        assert.equal(f.presences.at(-1)?.buffering, false);
+        assert.equal(f.presences.at(-1)?.paused, false);
+    } finally { f.close(); }
 });
 test('late item fetch cannot reopen audio after Stop or account disposal', async () => {
     let resolve;
