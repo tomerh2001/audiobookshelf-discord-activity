@@ -76,7 +76,7 @@ const server = http.createServer(async (req, res) => {
   const reportError = message => {
     fixtureErrors.push(String(message).slice(0, 500));
     let panel = document.getElementById('fixture-errors');
-    if (!panel) { panel = document.createElement('output'); panel.id = 'fixture-errors'; panel.setAttribute('role', 'alert'); panel.style.cssText = 'position:fixed;bottom:0;right:0;z-index:99999;background:#501010;color:white;padding:8px;font-size:12px;max-width:400px'; document.body.append(panel); }
+    if (!panel) { panel = document.createElement('output'); panel.id = 'fixture-errors'; panel.setAttribute('role', 'alert'); panel.style.cssText = 'pointer-events:none;position:fixed;bottom:0;right:0;z-index:99999;background:#501010;color:white;padding:8px;font-size:12px;max-width:400px'; document.body.append(panel); }
     panel.textContent = 'Synthetic fixture errors: ' + fixtureErrors.join(' | ');
   };
   window.addEventListener('error', event => reportError(event.message + ' at ' + (event.filename || '') + ':' + event.lineno));
@@ -86,7 +86,7 @@ const server = http.createServer(async (req, res) => {
   const sdk = { commands: { setActivity: async payload => {
     window.__presenceCalls.push(payload);
     let panel = document.getElementById('fixture-presence');
-    if (!panel) { panel = document.createElement('output'); panel.id = 'fixture-presence'; panel.setAttribute('role', 'status'); panel.style.cssText = 'position:fixed;top:0;right:0;z-index:99999;background:#111;color:white;padding:8px;font-size:12px;max-width:360px'; document.body.append(panel); }
+    if (!panel) { panel = document.createElement('output'); panel.id = 'fixture-presence'; panel.setAttribute('role', 'status'); panel.style.cssText = 'pointer-events:none;position:fixed;top:0;right:0;z-index:99999;background:#111;color:white;padding:8px;font-size:12px;max-width:360px'; document.body.append(panel); }
     panel.textContent = 'Synthetic Discord status: ' + (payload.activity ? payload.activity.details + ' / ' + payload.activity.state : 'cleared');
     return {};
   } } };
