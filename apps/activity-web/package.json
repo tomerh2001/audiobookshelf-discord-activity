@@ -13,7 +13,7 @@
   "dependencies": {
     "@app/shared": "workspace:*",
     "@discord/embedded-app-sdk": "^2.2.0",
-    "zod": "^4.1.13"
+    "zod": "^4.6.6"
   },
   "devDependencies": {
     "jsdom": "^27.3.0",
