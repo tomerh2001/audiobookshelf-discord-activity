@@ -241,19 +241,26 @@ export async function saveAuthentication(env: AppEnv, session: AppSession, targe
     throw error;
   }
   if (previous) {
-    const oldRefresh = decryptString(env, previous.encryptedRefreshToken);
+    const oldRefresh = savedRefreshToken(env, previous);
     if (oldRefresh !== auth.refreshToken) await logoutToken(target, oldRefresh);
   }
   return connection;
 }
 
 async function logoutToken(target: ValidatedUpstream, refreshToken: string): Promise<boolean> {
+  // A shared API key belongs to the operator. Disconnecting one participant
+  // must never revoke it for the other listeners.
+  if (!refreshToken) return false;
   try {
     const response = await upstreamFetch(target, "/logout", { method: "POST", signal: AbortSignal.timeout(5000),
       headers: { "x-refresh-token": refreshToken } });
     await response.body?.cancel();
     return response.ok || response.status === 401;
   } catch { return false; }
+}
+
+function savedRefreshToken(env: AppEnv, record: ConnectionRecord): string {
+  return record.encryptedRefreshToken ? decryptString(env, record.encryptedRefreshToken) : "";
 }
 
 function communityAllowedInGuild(env: AppEnv, guildId?: string): boolean {
@@ -263,13 +270,36 @@ function communityAllowedInGuild(env: AppEnv, guildId?: string): boolean {
 }
 
 export function communityAvailable(env: AppEnv, session: AppSession): boolean {
-  return env.AUDIOBOOKSHELF_AUTH_MODE === "shared" && Boolean(env.AUDIOBOOKSHELF_SHARED_USERNAME && env.AUDIOBOOKSHELF_SHARED_PASSWORD)
+  return env.AUDIOBOOKSHELF_AUTH_MODE === "shared" && Boolean(env.AUDIOBOOKSHELF_SHARED_API_KEY || (env.AUDIOBOOKSHELF_SHARED_USERNAME && env.AUDIOBOOKSHELF_SHARED_PASSWORD))
     && communityAllowedInGuild(env, session.discordContext?.guildId);
 }
 
 export async function connectCommunity(env: AppEnv, session: AppSession): Promise<ConnectionDto> {
   if (deniedDiscordActor(env, session.discordUserId)) throw new ConnectionError("discord_actor_forbidden", "This account cannot access this server.", 403);
   if (!communityAvailable(env, session)) throw new ConnectionError("community_account_unavailable", "This community has no shared Audiobookshelf account.", 403);
+  if (env.AUDIOBOOKSHELF_SHARED_API_KEY) {
+    if (!sessionStore.getSession(session.id)) throw new ConnectionError("invalid_app_session", "Open the Activity again before connecting.", 401);
+    const target = await validateUpstream(env, env.AUDIOBOOKSHELF_DEFAULT_SERVER_URL);
+    const server = await identifyServer(target);
+    const response = await upstreamFetch(target, "/api/authorize", { method: "POST",
+      headers: { Authorization: `Bearer ${env.AUDIOBOOKSHELF_SHARED_API_KEY}` }, signal: AbortSignal.timeout(10_000) });
+    if (!response.ok) { await response.body?.cancel(); throw new ConnectionError("community_account_unavailable", "The shared Audiobookshelf account is unavailable.", 502); }
+    const parsed = z.object({ user: z.object({ id: z.string().min(1), username: z.string().min(1), type: z.enum(["user", "guest"]) }) })
+      .safeParse(await readUpstreamJson(response));
+    if (!parsed.success) throw new ConnectionError("community_account_unavailable", "Configure a non-administrator Audiobookshelf account for community access.", 502);
+    if (!sessionStore.getSession(session.id) || deniedDiscordActor(env, session.discordUserId)) throw new ConnectionError("invalid_app_session", "Open the Activity again before connecting.", 401);
+    const store = new AudiobookshelfConnectionStore(env);
+    const existing = store.list(session.discordUserId, session.discordContext?.guildId)
+      .find((candidate) => candidate.serverUrl === target.serverUrl && candidate.kind === "community");
+    const previous = existing ? store.get(session.discordUserId, existing.id) : undefined;
+    const connection = store.save({ discordUserId: session.discordUserId,
+      serverUrl: target.serverUrl, serverId: server.Id, serverName: server.ServerName,
+      audiobookshelfUserId: parsed.data.user.id, audiobookshelfUsername: parsed.data.user.username,
+      encryptedAccessToken: encryptString(env, env.AUDIOBOOKSHELF_SHARED_API_KEY), encryptedRefreshToken: "",
+      loginDeviceId: `audiobookshelf-listen-${generateId()}`, kind: "community" }, session.discordContext?.guildId);
+    if (previous) await logoutToken(target, savedRefreshToken(env, previous));
+    return connection;
+  }
   return connectWithPassword(env, session, { serverUrl: env.AUDIOBOOKSHELF_DEFAULT_SERVER_URL,
     username: env.AUDIOBOOKSHELF_SHARED_USERNAME, password: env.AUDIOBOOKSHELF_SHARED_PASSWORD }, "community");
 }
@@ -280,6 +310,8 @@ function ownedConnection(env: AppEnv, discordUserId: string, connectionId: strin
   if (!record) throw notFound();
   if (record.kind === "community" && (record.communityGuildId !== (guildId ?? "")
     || env.AUDIOBOOKSHELF_AUTH_MODE !== "shared" || !communityAllowedInGuild(env, guildId))) throw notFound();
+  if (record.kind === "community" && !savedRefreshToken(env, record)
+    && decryptString(env, record.encryptedAccessToken) !== env.AUDIOBOOKSHELF_SHARED_API_KEY) throw notFound();
   return record;
 }
 
@@ -307,11 +339,13 @@ async function resolveCredential(env: AppEnv, initial: ConnectionRecord, guildId
   const target = await validateUpstream(env, record.serverUrl);
   await identifyServer(target);
   let token = decryptString(env, record.encryptedAccessToken);
-  let response = accessTokenExpiresSoon(token) ? undefined
+  const refreshToken = savedRefreshToken(env, record);
+  let response = refreshToken && accessTokenExpiresSoon(token) ? undefined
     : await upstreamFetch(target, "/api/authorize", { method: "POST", headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(10_000) });
   if (!response || response.status === 401) {
     await response?.body?.cancel();
-    const refreshed = await upstreamFetch(target, "/auth/refresh", { method: "POST", headers: { "x-refresh-token": decryptString(env, record.encryptedRefreshToken) }, signal: AbortSignal.timeout(10_000) });
+    if (!refreshToken) throw new ConnectionError("audiobookshelf_login_expired", "The shared Audiobookshelf account is unavailable.", 401);
+    const refreshed = await upstreamFetch(target, "/auth/refresh", { method: "POST", headers: { "x-refresh-token": refreshToken }, signal: AbortSignal.timeout(10_000) });
     if (!refreshed.ok) { await refreshed.body?.cancel(); throw new ConnectionError("audiobookshelf_login_expired", "Sign in to Audiobookshelf again.", 401); }
     const parsed = authSchema.safeParse(await readUpstreamJson(refreshed));
     if (!parsed.success || parsed.data.user.id !== record.audiobookshelfUserId) throw new ConnectionError("audiobookshelf_login_expired", "Sign in to Audiobookshelf again.", 401);
@@ -346,7 +380,7 @@ export async function disconnectConnection(env: AppEnv, discordUserId: string, c
   try {
     const target = await validateUpstream(env, record.serverUrl);
     await identifyServer(target);
-    upstreamRevoked = await logoutToken(target, decryptString(env, record.encryptedRefreshToken));
+    upstreamRevoked = await logoutToken(target, savedRefreshToken(env, record));
   } catch { /* Local capabilities are already revoked if the server is unavailable. */ }
   return { ok: true, upstreamRevoked };
 }

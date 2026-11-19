@@ -242,6 +242,44 @@ describe("saved Audiobookshelf connections", () => {
     expect(new AudiobookshelfConnectionStore(f.env).list("alice")).toEqual([]);
     expect(f.state.logoutCount).toBe(1);
   });
+
+  it("connects an OIDC-only community through a private API key and disconnects one listener without revoking others", async () => {
+    const key = "private-community-api-key";
+    const f = await fixture({ AUDIOBOOKSHELF_AUTH_MODE: "shared", AUDIOBOOKSHELF_COMMUNITY_ACCESS: "public", AUDIOBOOKSHELF_SHARED_API_KEY: key });
+    f.state.publicInfo = { app: "audiobookshelf", isInit: true, serverVersion: "2.38.0", authMethods: ["openid"] };
+    const alice = await actor(f.env, "alice");
+    const bob = await actor(f.env, "bob");
+    const chosen = await f.app.inject({ method: "POST", url: "/api/connections/community", headers: alice.headers });
+    expect(chosen.statusCode).toBe(201);
+    expect(chosen.body).not.toContain(key);
+    const connection = chosen.json<{ connection: ConnectionDto }>().connection;
+    expect(connection).toMatchObject({ audiobookshelfUsername: "community", kind: "community" });
+    const second = await connectCommunity(f.env, bob.session);
+    expect((await resolveConnection(f.env, "alice", connection.id)).accessToken).toBe(key);
+    const stored = await readFile(path.join(f.dataDir, "audiobookshelf-connections.sqlite"));
+    expect(stored.includes(Buffer.from(key))).toBe(false);
+    expect(await disconnectConnection(f.env, "alice", connection.id)).toEqual({ ok: true, upstreamRevoked: false });
+    expect((await resolveConnection(f.env, "bob", second.id)).accessToken).toBe(key);
+    expect(f.requests.every((request) => ["/status", "/api/authorize"].includes(request.path))).toBe(true);
+    f.state.expiredToken = key;
+    await expect(resolveConnection(f.env, "bob", second.id)).rejects.toMatchObject({ code: "audiobookshelf_login_expired" });
+    expect(f.state.refreshCount).toBe(0);
+    f.state.expiredToken = "";
+    f.env.AUDIOBOOKSHELF_SHARED_API_KEY = "rotated-key";
+    await expect(resolveConnection(f.env, "bob", second.id)).rejects.toMatchObject({ code: "connection_not_found" });
+  });
+
+  it("rejects administrator community API keys and revoked app sessions before saving access", async () => {
+    const f = await fixture({ AUDIOBOOKSHELF_AUTH_MODE: "shared", AUDIOBOOKSHELF_COMMUNITY_ACCESS: "public", AUDIOBOOKSHELF_SHARED_API_KEY: "private-community-api-key" });
+    const alice = await actor(f.env);
+    f.state.authorizeUserType = "root";
+    await expect(connectCommunity(f.env, alice.session)).rejects.toMatchObject({ code: "community_account_unavailable" });
+    f.state.authorizeUserType = "user";
+    f.state.beforeAuthorizeResponse = () => sessionStore.deleteSession(alice.session.id);
+    await expect(connectCommunity(f.env, alice.session)).rejects.toMatchObject({ code: "invalid_app_session" });
+    expect(new AudiobookshelfConnectionStore(f.env).list("alice")).toEqual([]);
+    expect(f.state.logoutCount).toBe(0);
+  });
 });
 
 async function actor(env: AppEnv, userId = "alice", guildId?: string) {
@@ -254,9 +292,11 @@ async function actor(env: AppEnv, userId = "alice", guildId?: string) {
 async function fixture(overrides: NodeJS.ProcessEnv = {}) {
   const requests: { method: string; path: string; headers: IncomingHttpHeaders; body: unknown }[] = [];
   const state = { publicInfo: { app: "audiobookshelf", isInit: true, serverVersion: "2.38.0", authMethods: ["local", "openid"] } as unknown,
-    authStatus: 200, authCount: 0, logoutCount: 0, refreshCount: 0, authorizeUserId: "", expiredToken: "", accessToken: "",
+    authStatus: 200, authCount: 0, logoutCount: 0, refreshCount: 0, authorizeUserId: "", authorizeUserType: "user", expiredToken: "", accessToken: "",
+    beforeAuthorizeResponse: undefined as (() => void) | undefined,
     beforeAuthResponse: undefined as (() => void) | undefined };
   const users = new Map<string, string>();
+  if (overrides.AUDIOBOOKSHELF_SHARED_API_KEY) users.set(overrides.AUDIOBOOKSHELF_SHARED_API_KEY, "user-community");
   const server = createServer(async (request, response) => {
     const chunks: Buffer[] = [];
     for await (const chunk of request) chunks.push(Buffer.from(chunk as Uint8Array));
@@ -278,9 +318,10 @@ async function fixture(overrides: NodeJS.ProcessEnv = {}) {
       return send({ user: { id: `user-${username}`, username, accessToken, refreshToken: `fixture-refresh-token-${state.authCount}` } });
     }
     if (url.pathname === "/api/authorize") {
+      state.beforeAuthorizeResponse?.();
       const token = request.headers.authorization?.replace(/^Bearer /, "") ?? "";
       if (token === state.expiredToken || !users.has(token)) return send({}, 401);
-      return send({ user: { id: state.authorizeUserId || users.get(token) } });
+      return send({ user: { id: state.authorizeUserId || users.get(token), username: users.get(token)?.replace(/^user-/, ""), type: state.authorizeUserType } });
     }
     if (url.pathname === "/auth/refresh") {
       state.refreshCount++;

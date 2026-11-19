@@ -47,11 +47,12 @@ For public community access, the operator can separately configure:
 DISCORD_ACCESS_MODE=public
 AUDIOBOOKSHELF_AUTH_MODE=shared
 AUDIOBOOKSHELF_COMMUNITY_ACCESS=public
-AUDIOBOOKSHELF_SHARED_USERNAME=community
-AUDIOBOOKSHELF_SHARED_PASSWORD=replace-with-the-community-password
+AUDIOBOOKSHELF_SHARED_API_KEY_FILE=/run/secrets/audiobookshelf-community-key
 ```
 
 This is an explicit opt-in to sharing that account with authenticated Discord Activity participants. Personal Authentik sign-in remains available. A safer limited deployment uses `DISCORD_ACCESS_MODE=restricted` and `AUDIOBOOKSHELF_COMMUNITY_ACCESS=guilds`, with `AUDIOBOOKSHELF_COMMUNITY_GUILD_IDS` listing the permitted Discord guilds. If that list is empty, community access uses `DISCORD_ALLOWED_GUILD_IDS`.
+
+Create a dedicated non-administrator user in Audiobookshelf, restrict its libraries and permissions, then create an API key for that user under Settings → API Keys. The API key works while local password login remains disabled. Save it as a mounted secret; `AUDIOBOOKSHELF_SHARED_API_KEY` is also supported and takes precedence over shared username/password. The Activity encrypts saved copies and authenticates the key with Audiobookshelf before use. Disconnect removes only that Discord participant's connection; revoke the key in Audiobookshelf to revoke all community access. Key rotation requires participants to reconnect. For servers that allow local login, `AUDIOBOOKSHELF_SHARED_USERNAME` and `AUDIOBOOKSHELF_SHARED_PASSWORD` remain available instead.
 
 ## Security and behavior
 
@@ -59,7 +60,7 @@ The browser handoff has a single-use ticket. The callback checks a random state 
 
 The backend exchanges the authorization code with Audiobookshelf's `/auth/openid/callback`, not the Authentik token endpoint. Provider cookies and tokens never enter Activity browser storage or API responses. Failed, expired, replayed, superseded or logged-out attempts cannot save a connection. A successful callback displays a static return-to-Discord page; the original Activity session receives the result by polling.
 
-Access and rotating refresh tokens are encrypted in the connections database. Concurrent refreshes for one connection share one request. Refresh preserves playback capabilities, while relinking or disconnecting revokes them. Disconnect revokes the Activity's Audiobookshelf refresh session; it does not sign the reader out of every Authentik application or revoke every device.
+Access and rotating refresh tokens are encrypted in the connections database. Concurrent refreshes for one connection share one request. Refresh preserves playback capabilities, while relinking or disconnecting revokes them. Disconnect revokes the Activity's Audiobookshelf refresh session when it has one; it does not revoke an operator's shared API key, sign the reader out of every Authentik application or revoke every device.
 
 Audiobookshelf `/status` identifies the application but provides no stable installation ID. The Activity's server ID is a hash of the canonical destination URL, and authenticated checks verify the saved Audiobookshelf user ID. Do not interpret that local server ID as independent proof of an unchanged server installation.
 

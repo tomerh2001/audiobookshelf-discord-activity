@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 
-const secretKeys = ["DISCORD_CLIENT_SECRET", "DISCORD_BOT_TOKEN", "DISCORD_PROXY_EDGE_SECRET", "APP_SESSION_SECRET", "TOKEN_ENCRYPTION_KEY", "AUDIOBOOKSHELF_SHARED_PASSWORD"] as const;
+const secretKeys = ["DISCORD_CLIENT_SECRET", "DISCORD_BOT_TOKEN", "DISCORD_PROXY_EDGE_SECRET", "APP_SESSION_SECRET", "TOKEN_ENCRYPTION_KEY", "AUDIOBOOKSHELF_SHARED_PASSWORD", "AUDIOBOOKSHELF_SHARED_API_KEY"] as const;
 
 /** Load only known secrets, without logging their contents or file paths. */
 export function loadSecretFiles(input: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {

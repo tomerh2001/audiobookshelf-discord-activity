@@ -45,6 +45,7 @@ export const envSchema = z.object({
   AUDIOBOOKSHELF_OIDC_ENABLED: booleanFromString.default(true),
   AUDIOBOOKSHELF_SHARED_USERNAME: z.string().default(""),
   AUDIOBOOKSHELF_SHARED_PASSWORD: z.string().default(""),
+  AUDIOBOOKSHELF_SHARED_API_KEY: z.string().default(""),
   ROOM_MAX_PARTICIPANTS: z.coerce.number().int().positive().default(20),
   RATE_LIMIT_MAX: z.coerce.number().int().positive().default(300),
   RATE_LIMIT_WINDOW: z.string().default("1 minute"),
@@ -84,8 +85,8 @@ export function loadEnv(input: NodeJS.ProcessEnv = process.env): AppEnv {
       problems.push("AUDIOBOOKSHELF_COMMUNITY_GUILD_IDS must contain valid Discord IDs");
     }
     if (!env.PUBLIC_BASE_URL.startsWith("https://")) problems.push("PUBLIC_BASE_URL must use HTTPS");
-    if (env.AUDIOBOOKSHELF_AUTH_MODE === "shared" && (!env.AUDIOBOOKSHELF_SHARED_USERNAME || !env.AUDIOBOOKSHELF_SHARED_PASSWORD)) {
-      problems.push("Shared Audiobookshelf username and password must be configured");
+    if (env.AUDIOBOOKSHELF_AUTH_MODE === "shared" && !env.AUDIOBOOKSHELF_SHARED_API_KEY && (!env.AUDIOBOOKSHELF_SHARED_USERNAME || !env.AUDIOBOOKSHELF_SHARED_PASSWORD)) {
+      problems.push("Configure a shared Audiobookshelf API key or username and password");
     }
     if (problems.length) throw new Error(`Invalid production configuration: ${problems.join("; ")}`);
   }

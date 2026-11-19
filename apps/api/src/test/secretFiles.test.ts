@@ -12,6 +12,8 @@ describe("secret file loading", () => {
       writeFileSync(file, "secret\n", { mode: 0o600 });
       const input = { AUDIOBOOKSHELF_SHARED_PASSWORD_FILE: file };
       expect(loadSecretFiles(input).AUDIOBOOKSHELF_SHARED_PASSWORD).toBe("secret");
+      expect(loadSecretFiles({ AUDIOBOOKSHELF_SHARED_API_KEY_FILE: file }).AUDIOBOOKSHELF_SHARED_API_KEY).toBe("secret");
+      expect(() => loadSecretFiles({ AUDIOBOOKSHELF_SHARED_API_KEY_FILE: file, AUDIOBOOKSHELF_SHARED_API_KEY: "conflict" })).toThrow("not both");
       expect(input).not.toHaveProperty("AUDIOBOOKSHELF_SHARED_PASSWORD");
       expect(() => loadSecretFiles({ ...input, AUDIOBOOKSHELF_SHARED_PASSWORD: "conflict" })).toThrow("not both");
       expect(() => loadSecretFiles({ DISCORD_BOT_TOKEN_FILE: "/sensitive/not-present" })).toThrow("Unable to load DISCORD_BOT_TOKEN_FILE.");
