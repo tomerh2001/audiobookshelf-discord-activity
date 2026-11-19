@@ -24,12 +24,12 @@ it("describes the actual episode and supplies a progress interval in RPC seconds
   const activity = formatWatchActivity(episode, epoch);
   expect(activity).toMatchObject({ type: 3, details: "Death Note · Season 1 · Episode 7", state: "Overcast · Playing",
     timestamps: { start: 1_799_999_527, end: 1_800_000_907 } });
-  expect(formatWatchActivity({ ...episode, paused: true }, epoch)).toMatchObject({
-    state: "Overcast · Paused · 7:53 / 23:00", timestamps: null
-  });
-  expect(formatWatchActivity({ ...episode, buffering: true }, epoch)).toMatchObject({
-    state: "Overcast · Buffering · 7:53 / 23:00", timestamps: null
-  });
+  const paused = formatWatchActivity({ ...episode, paused: true }, epoch);
+  expect(paused.state).toBe("Overcast · Paused · 7:53 / 23:00");
+  expect(paused).not.toHaveProperty("timestamps");
+  const buffering = formatWatchActivity({ ...episode, buffering: true }, epoch);
+  expect(buffering.state).toBe("Overcast · Buffering · 7:53 / 23:00");
+  expect(buffering).not.toHaveProperty("timestamps");
 });
 
 it("handles movies, episode ranges, specials, absent numbering and playback speed", () => {
@@ -159,7 +159,9 @@ it("publishes audiobooks and podcast episodes as listening with their actual tit
   const podcast: WatchSnapshot = { ...episode, kind: "podcast", title: "The Long Journey", seriesName: "Stories at Night" };
   delete podcast.seasonNumber; delete podcast.episodeNumber;
   expect(formatWatchActivity(podcast, epoch)).toMatchObject({ type: 2, details: "Stories at Night", state: "The Long Journey · Playing" });
-  expect(formatWatchActivity({ ...podcast, paused: true }, epoch)).toMatchObject({ type: 2, state: "The Long Journey · Paused · 7:53 / 23:00", timestamps: null });
+  const paused = formatWatchActivity({ ...podcast, paused: true }, epoch);
+  expect(paused).toMatchObject({ type: 2, state: "The Long Journey · Paused · 7:53 / 23:00" });
+  expect(paused).not.toHaveProperty("timestamps");
 });
 
 it("reports disabled scope, accepted RPC and rejected RPC without recording the title or error text", async () => {
@@ -172,12 +174,12 @@ it("reports disabled scope, accepted RPC and rejected RPC without recording the 
   const publisher = createWatchPresence(context, diagnostics);
   publisher.update({ ...episode, kind: "audio", title: "Private book title" }); await tick();
   expect(diagnostics.mock.calls.map(call => call[0])).toEqual([
-    { event: "attempt", operation: "set", activityType: 2, titlePresent: true },
-    { event: "success", operation: "set", activityType: 2, titlePresent: true }
+    { event: "attempt", operation: "set", activityType: 2, titlePresent: true, playing: true },
+    { event: "success", operation: "set", activityType: 2, titlePresent: true, playing: true }
   ]);
   setActivity.mockRejectedValueOnce({ code: 4006, message: "private response details" });
   publisher.update({ ...episode, paused: true }); await tick(5_000);
-  expect(diagnostics).toHaveBeenLastCalledWith({ event: "error", operation: "set", activityType: 3, titlePresent: true, errorKind: "rpc", code: 4006 });
+  expect(diagnostics).toHaveBeenLastCalledWith({ event: "error", operation: "set", activityType: 3, titlePresent: true, playing: false, errorKind: "rpc", code: 4006 });
   expect(JSON.stringify(diagnostics.mock.calls)).not.toMatch(/Private book|private response|Death Note/);
 });
 

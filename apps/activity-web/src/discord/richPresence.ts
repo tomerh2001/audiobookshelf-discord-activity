@@ -79,11 +79,11 @@ export function formatWatchActivity(snapshot: WatchSnapshot, now: number, iconUr
     type: listening ? 2 : 3,
     details: displayDetails,
     state,
-    timestamps: snapshot.paused || snapshot.buffering ? null : {
+    ...(!snapshot.paused && !snapshot.buffering ? { timestamps: {
       // SET_ACTIVITY (RPC) accepts Unix seconds, unlike received Gateway events.
       start: Math.floor((now - position / rate) / 1000),
       ...(duration ? { end: Math.floor((now + (duration - position) / rate) / 1000) } : {})
-    },
+    } } : {}),
     assets: iconUrl ? { large_image: iconUrl, large_text: displayDetails } : null
   };
 }
@@ -152,7 +152,7 @@ function createPublisher(context: ActivityDiscordContext) {
     inFlight = true;
     lastAttempt = Date.now();
     const operation: "set" | "clear" = sending ? "set" : "clear";
-    const diagnostic = { operation, ...(sending ? { activityType: sending.type as 2 | 3, titlePresent: !!sending.details } : {}) };
+    const diagnostic = { operation, ...(sending ? { activityType: sending.type as 2 | 3, titlePresent: !!sending.details, playing: !!sending.timestamps } : {}) };
     diagnose(onDiagnostic, { event: "attempt", ...diagnostic });
     let deadline: ReturnType<typeof setTimeout>;
     let timedOut = false;

@@ -23,4 +23,6 @@ After reproducing in the Activity, inspect `activity_presence_diagnostic` in the
 - `attempt` records a set/clear request. `success` means the SDK accepted a response; its `titlePresent` describes the returned response, not just the request.
 - `error` distinguishes a numeric Discord error, a validation failure, a timeout or an unknown failure.
 
+Set events also include `playing`, which identifies whether that request included a running timer. RPC error `4000` means `INVALID_PAYLOAD`; it is distinct from WebSocket close codes. The formatter omits timestamps while paused or buffering and rebuilds them on resume. Discord's Embedded SDK documentation allows optional, nullable fields, so a rejected update alone does not establish which field failed. Compare playing and paused acknowledgements, then verify both states on the real profile.
+
 No diagnostic event proves that Discord rendered a profile card. The installed SDK validates responses: an empty synthetic response is not a valid success and may be discarded until the command times out. Use a response with the SDK-required fields in fixtures, then verify the real card separately. Do not log raw SDK traffic; authentication frames can contain credentials.
