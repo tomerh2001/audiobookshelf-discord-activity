@@ -13,6 +13,7 @@ import { healthRoutes } from "./routes/health.js";
 import { connectionRoutes } from "./routes/connections.js";
 import { nativePartyRoutes } from "./routes/nativeParty.js";
 import { nativeAudiobookshelfRoutes } from "./routes/nativeAudiobookshelf.js";
+import { diagnosticRoutes } from "./routes/diagnostics.js";
 import { getNativePartyService } from "./services/nativeParty.js";
 import { AuthError, sendAuthError } from "./plugins/auth.js";
 
@@ -50,6 +51,7 @@ export async function buildApp(env: AppEnv = loadEnv()) {
   await app.register(discordAuthRoutes);
   await app.register(discordInteractionRoutes);
   await app.register(connectionRoutes);
+  await app.register(diagnosticRoutes);
   await app.register(nativePartyRoutes);
   await app.register(nativeAudiobookshelfRoutes);
   await app.register(staticFrontendPlugin);

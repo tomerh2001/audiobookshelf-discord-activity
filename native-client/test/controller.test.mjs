@@ -285,6 +285,31 @@ test('party replacement clears selection and requires an explicit account choice
     assert.equal(f.calls.filter(value => Array.isArray(value) && value[0] === 'install').length, 1);
 });
 
+test('a verified resume after server replacement keeps the selected account for one fresh launch', async () => {
+    const f = fixture(); await f.controller.start(); await f.controller.select(connection);
+    f.broker.getParty = async token => {
+        if (token === 'initial') { f.reject(token); throw new Error('expired'); }
+        return null;
+    };
+    assert.equal(await f.controller.poll(), false);
+    assert.equal(f.controller.selection, connection);
+    assert.equal(f.controller.needsLaunch, true);
+    await f.controller.select(f.controller.selection);
+    assert.equal(f.controller.needsLaunch, false);
+    assert.equal(f.calls.filter(value => value === 'resume').length, 1);
+    assert.equal(f.calls.filter(value => value === 'join').length, 1);
+    assert.deepEqual(f.calls.at(-1), ['install', 'renewed']);
+});
+
+test('party removal without a verified resume still requires an explicit account choice', async () => {
+    const f = fixture(); await f.controller.start(); await f.controller.select(connection);
+    f.broker.getParty = async () => null;
+    assert.equal(await f.controller.poll(), true);
+    assert.equal(f.controller.selection, undefined);
+    assert.equal(f.controller.needsLaunch, false);
+    assert.ok(!f.calls.includes('resume'));
+});
+
 test('leaving revokes first and then closes without generating invites or commands', async () => {
     const f = fixture(); await f.controller.start();
     await f.controller.leave();

@@ -6,36 +6,32 @@ import { createNativePlayer } from './nativePlaybackAdapter';
 import { onDocumentExit } from './lifecycle';
 import { createLibraryRefresh } from './libraryRefresh';
 import { refreshNativeBrowse } from './browseRefresh';
+import { createAccountRecovery } from './accountRecovery';
 
 /** Nuxt owns the document. Discord and upstream credentials are separate. */
 export default async function (context, inject) {
     const { app, store, $axios } = context;
     const broker = window.AudiobookshelfWatch;
     const state = Vue.observable({ error: '', accountRevision: 0, browseRevision: 0, rosterOpen: false, roster: { participants: [], loading: true }, ready: false, blocked: false, preview: false, snapshot: null });
-    let socket, player, component, presence, roster, presentation, libraryRefresh, pendingRecovery, checkpoint = 0, closed = false;
+    let socket, player, component, presence, roster, presentation, libraryRefresh, recoveryRoute, checkpoint = 0, closed = false;
     let history = [], routeStop, pollTimer, checkpointTimer;
     const activity = {
         state, baseUrl: '', controller: null,
         get player() { return player; },
         call: (...args) => controller.call(...args),
-        async load() { await ensureStart(); controller.retryRecovery(); state.error = ''; return controller.load(); },
-        async select(connection) { await controller.select(connection); if (store.state.user.user) await home(); },
+        async load(retry = false) { await ensureStart(); if (retry) { if (recovery.busy) controller.cancelSelection(); recovery.cancel(); controller.retryRecovery(); state.error = ''; } return controller.load(); },
+        async select(connection) { if (recovery.busy) controller.cancelSelection(); recovery.cancel(); controller.retryRecovery(); recoveryRoute = undefined; await controller.select(connection); if (store.state.user.user) await home(); },
         async openExternal(url) {
             const parsed = new URL(url, window.location.origin);
             if (parsed.protocol !== 'https:' && !(controller.session.discord.isMock && parsed.protocol === 'http:')) throw new Error('Sign-in requires a secure browser link.');
             if (controller.session.discord.sdk) return controller.session.discord.sdk.commands.openExternalLink({ url: parsed.href });
             window.open(parsed.href, '_blank', 'noopener,noreferrer');
         },
-        async logout() { await controller.logoutAccount(); teardownAccount(); clearAccount(); history = []; await app.router.replace('/login'); },
-        async switchAccounts() { controller.cancelSelection(); teardownAccount(); clearAccount(); history = []; await app.router.replace('/login'); },
-        async leave() { await controller.leave(); teardownAccount(); clearAccount(); closed = true; state.error = 'You have left the listening party.'; await app.router.replace('/login'); },
-        reconnect() {
-            if (closed || pendingRecovery || !controller.selection) return pendingRecovery;
-            const connection = controller.selection;
-            pendingRecovery = controller.select(connection).catch(() => { state.error = 'Connection interrupted. Open your account and try connecting again.'; }).finally(() => { pendingRecovery = undefined; });
-            return pendingRecovery;
-        },
-        async retry() { controller.retryRecovery(); state.error = ''; return activity.reconnect(); },
+        async logout() { recovery.cancel(); recoveryRoute = undefined; await controller.logoutAccount(); teardownAccount(); clearAccount(); history = []; await app.router.replace('/login'); },
+        async switchAccounts() { recovery.cancel(); recoveryRoute = undefined; controller.cancelSelection(); teardownAccount(); clearAccount(); history = []; await app.router.replace('/login'); },
+        async leave() { recovery.cancel(); recoveryRoute = undefined; await controller.leave(); teardownAccount(); clearAccount(); closed = true; state.error = 'You have left the listening party.'; await app.router.replace('/login'); },
+        reconnect() { if (!closed) return recovery.run(); },
+        async retry() { controller.retryRecovery(); state.error = ''; return recovery.retry(); },
         attach(value) { component = value; startPlayer(); },
         detach(value) { if (component === value) { player?.dispose(); player = undefined; component = undefined; } },
         roster() { state.rosterOpen = true; roster?.refresh(); },
@@ -47,6 +43,20 @@ export default async function (context, inject) {
     inject('activity', activity);
     const fail = message => { state.error = message; app.$toast?.error(message); };
     const controller = createActivityController(broker, install, randomId());
+    const diagnostics = broker.createPresenceDiagnostics(() => controller.session?.exchange.appToken);
+    const recovery = createAccountRecovery({
+        getSelection: () => controller.selection,
+        stop() {
+            recoveryRoute ||= broker.normalizeNativeRoute(app.router.currentRoute.fullPath, controller.selection.serverId);
+            teardownAccount(); clearAccount();
+        },
+        recover: connection => controller.select(connection),
+        onRecovered: () => { state.error = ''; },
+        onError: () => {
+            teardownAccount(); clearAccount(); state.error = 'Connection interrupted. Choose a saved account or try connecting again.';
+            void app.router.replace('/login').catch(() => {});
+        }
+    });
     activity.controller = controller;
     let startup;
     function ensureStart() {
@@ -79,7 +89,7 @@ export default async function (context, inject) {
         if (!current()) return;
         const user = payload.user || payload;
         if (user.id !== launch.userId) throw new Error('Audiobookshelf returned another account.');
-        const oldRoute = activity.baseUrl && broker.normalizeNativeRoute(app.router.currentRoute.fullPath, launch.serverId);
+        const oldRoute = recoveryRoute || (activity.baseUrl && broker.normalizeNativeRoute(app.router.currentRoute.fullPath, launch.serverId));
         teardownAccount(); clearAccount();
         activity.baseUrl = launch.baseUrl;
         app.$config.routerBasePath = launch.baseUrl;
@@ -115,14 +125,16 @@ export default async function (context, inject) {
                 if (event === 'stream_error') fail('Audiobookshelf could not continue this audio stream. Try Play again.');
             }
         });
-        presence = broker.createWatchPresence(controller.session.discord);
+        presence = broker.createWatchPresence(controller.session.discord, diagnostics.report);
         socket.start(); startPlayer(); state.error = '';
         const restored = oldRoute || broker.normalizeNativeRoute(launch.restoreRoute, launch.serverId);
         if (restored) await app.router.replace(restored).catch(() => {});
+        if (current()) recoveryRoute = undefined;
     }
     function startPlayer() {
         if (!component || !socket || !activity.baseUrl || player) return;
         player = createNativePlayer({ component, socket, baseUrl: activity.baseUrl, presence,
+            onDiagnostic: diagnostics.report,
             onSnapshot: value => { state.snapshot = value; }, onBlocked: value => { state.blocked = value; }, onError: fail });
         void player.start().catch(() => {});
     }
@@ -142,7 +154,7 @@ export default async function (context, inject) {
     });
     const removeExit = onDocumentExit(window, () => {
         saveRoute(true); closed = true; clearInterval(pollTimer); clearInterval(checkpointTimer);
-        teardownAccount(); roster?.dispose(); presentation?.(); routeStop?.(); controller.dispose(); removeExit();
+        recovery.dispose(); teardownAccount(); diagnostics.dispose(); roster?.dispose(); presentation?.(); routeStop?.(); controller.dispose(); removeExit();
     });
     try {
         await ensureStart();
@@ -151,12 +163,17 @@ export default async function (context, inject) {
         if (preferred) await controller.select(preferred);
     } catch (error) { state.error = error.message; }
     if (!store.state.user.user) context.redirect('/login');
+    const partyConnectionError = 'The party connection was interrupted. Try connecting again.';
     pollTimer = setInterval(() => {
-        if (closed || !state.ready || state.error) return;
+        if (closed || !state.ready || recovery.blocked) return;
         void controller.poll().then(changed => {
+            if (state.error === partyConnectionError) state.error = '';
             if (changed) { teardownAccount(); clearAccount(); return app.router.replace('/login'); }
             if (controller.needsLaunch) return activity.reconnect();
-        }).catch(() => { state.error = 'The party connection was interrupted. Try connecting again.'; });
+        }).catch(error => {
+            if (controller.selection && (error.recoveryRequired || controller.needsLaunch)) return activity.reconnect();
+            state.error = partyConnectionError;
+        });
     }, 15_000);
     checkpointTimer = setInterval(() => saveRoute(), 15_000);
 }

@@ -1,5 +1,6 @@
 import type { DiscordSDK } from "@discord/embedded-app-sdk";
 import type { ActivityDiscordContext } from "./sdk.js";
+import type { PresenceDiagnostic, PresenceDiagnosticListener } from "./presenceDiagnostics.js";
 
 /** Deliberately excludes Audiobookshelf server addresses, identifiers and credentials. */
 export type WatchSnapshot = {
@@ -97,9 +98,10 @@ function applicationIcon(context: ActivityDiscordContext): string | undefined {
 const transports = new WeakMap<DiscordSDK, { publisher: ReturnType<typeof createPublisher>; owner: number }>();
 
 /** One transport per authenticated Discord document, with an account-local lease. */
-export function createWatchPresence(context: ActivityDiscordContext) {
+export function createWatchPresence(context: ActivityDiscordContext, onDiagnostic?: PresenceDiagnosticListener) {
   const sdk = context.sdk;
   if (context.isMock || context.isStandalone || !sdk || !context.grantedScopes?.includes("rpc.activities.write")) {
+    diagnose(onDiagnostic, { event: "disabled", reason: context.isMock ? "mock" : context.isStandalone ? "standalone" : !sdk ? "missing_sdk" : "missing_scope" });
     return { update(_snapshot: WatchSnapshot | null) {}, clear() {}, dispose() {} };
   }
   let transport = sdk ? transports.get(sdk) : undefined;
@@ -108,6 +110,7 @@ export function createWatchPresence(context: ActivityDiscordContext) {
     if (sdk) transports.set(sdk, transport);
   }
   const current = transport;
+  current.publisher.setDiagnosticListener(onDiagnostic);
   const owner = ++current.owner;
   let closed = false;
   current.publisher.clear();
@@ -115,6 +118,11 @@ export function createWatchPresence(context: ActivityDiscordContext) {
     if (!closed && current.owner === owner) current.publisher.update(snapshot);
   };
   return { update, clear: () => update(null), dispose() { update(null); closed = true; } };
+}
+
+function diagnose(listener: PresenceDiagnosticListener | undefined, value: PresenceDiagnostic) {
+  // Never allow an optional observer to change the RPC or playback lifecycle.
+  try { listener?.(value); } catch { /* Diagnostics are best effort. */ }
 }
 
 /** Latest-state, rate-limited RPC publisher. Never participates in authentication. */
@@ -129,6 +137,7 @@ function createPublisher(context: ActivityDiscordContext) {
   let inFlight = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
   const icon = applicationIcon(context);
+  let onDiagnostic: PresenceDiagnosticListener | undefined;
 
   const cancelTimer = () => { if (timer !== undefined) clearTimeout(timer); timer = undefined; };
   const same = (a: Activity | null | undefined, b: Activity | null | undefined) => JSON.stringify(a) === JSON.stringify(b);
@@ -142,17 +151,27 @@ function createPublisher(context: ActivityDiscordContext) {
     const sendingVersion = version;
     inFlight = true;
     lastAttempt = Date.now();
+    const operation: "set" | "clear" = sending ? "set" : "clear";
+    const diagnostic = { operation, ...(sending ? { activityType: sending.type as 2 | 3, titlePresent: !!sending.details } : {}) };
+    diagnose(onDiagnostic, { event: "attempt", ...diagnostic });
     let deadline: ReturnType<typeof setTimeout>;
+    let timedOut = false;
     const command = Promise.resolve().then(() => sdk.commands.setActivity({ activity: sending }));
     void Promise.race([command, new Promise<never>((_, reject) => {
-      deadline = setTimeout(() => reject(new Error("Presence response timed out")), 10_000);
-    })]).then(() => {
+      deadline = setTimeout(() => { timedOut = true; reject(new Error("Presence response timed out")); }, 10_000);
+    })]).then(response => {
       published = sending;
       retryAfter = -Infinity;
+      diagnose(onDiagnostic, { event: "success", ...diagnostic, ...(sending ? { titlePresent: !!response?.details } : {}) });
     }).catch((error: unknown) => {
       // A denied/unsupported command must never trigger another consent flow or
       // interrupt playback. Retry transient failures only after a fresh update.
       const code = (error as { code?: number } | null)?.code;
+      const safeCode = typeof code === "number" && Number.isInteger(code) && code >= 0 && code <= 65535 ? code : undefined;
+      const name = (error as { name?: string } | null)?.name;
+      diagnose(onDiagnostic, { event: "error", ...diagnostic,
+        errorKind: timedOut ? "timeout" : safeCode !== undefined ? "rpc" : name === "ZodError" ? "response_validation" : "unknown",
+        ...(safeCode === undefined ? {} : { code: safeCode }) });
       if (code === 4002 || code === 4006 || code === 4009 || code === 4010) enabled = false;
       // A lost response doesn't prove that Discord didn't apply the command.
       published = undefined;
@@ -178,6 +197,7 @@ function createPublisher(context: ActivityDiscordContext) {
   }
 
   return {
+    setDiagnosticListener(listener: PresenceDiagnosticListener | undefined) { onDiagnostic = listener; },
     update,
     clear() { update(null); }
   };

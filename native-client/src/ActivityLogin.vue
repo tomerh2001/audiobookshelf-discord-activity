@@ -21,7 +21,7 @@
           <p class="text-sm text-gray-300 mb-2">Saved accounts</p>
           <ui-btn v-for="connection in saved" :key="connection.id" :disabled="busy" class="w-full mb-2" color="bg-bg" @click="select(connection)">{{ connection.audiobookshelfUsername }}</ui-btn>
         </div>
-        <ui-btn v-if="error || $activity.state.error" :disabled="busy" class="w-full mt-3" color="bg-bg" @click="load">Try again</ui-btn>
+        <ui-btn v-if="error || $activity.state.error" :disabled="busy" class="w-full mt-3" color="bg-bg" @click="load(true)">Try again</ui-btn>
         <ui-btn v-if="waiting" class="w-full mt-3" color="bg-bg" @click="cancel">Cancel sign-in</ui-btn>
       </template>
     </div>
@@ -32,15 +32,15 @@ export default {
   layout: 'blank',
   data: () => ({ username: '', password: '', options: null, party: null, error: '', loading: true, busy: false, waiting: false, generation: 0, timer: null, timerResolve: null }),
   computed: { canCommunity() { return this.options?.communityAvailable; }, saved() { return (this.options?.connections || []).filter(value => !this.party || window.AudiobookshelfWatch.matchesPartyServer(value, this.party)); } },
-  mounted() { this.load(); },
+  mounted() { this.load(false); },
   beforeDestroy() { this.cancel(); },
   methods: {
     cancel() { this.generation++; clearTimeout(this.timer); this.timerResolve?.(); this.timerResolve = null; this.waiting = false; this.busy = false; this.password = ''; },
-    async load() {
+    async load(retry = false) {
       const generation = ++this.generation;
       this.loading = true; this.error = '';
       try {
-        const { data, party } = await this.$activity.load();
+        const { data, party } = await this.$activity.load(retry);
         if (generation !== this.generation) return;
         this.options = data; this.party = party;
       } catch (error) { if (generation === this.generation) this.error = error.message; }

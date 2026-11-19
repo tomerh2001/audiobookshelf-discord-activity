@@ -2,15 +2,32 @@
 export async function integrate(replace) {
     await replace('client/components/app/Appbar.vue', 'src="~static/icon.svg"', 'src="/branding/audiobookshelf-listen-icon.png"');
     await replace('client/components/app/Appbar.vue', '>audiobookshelf</h1>', '>Audiobookshelf Listen</h1>');
+    await replace('client/components/app/Appbar.vue', 'class="w-full h-16 bg-primary relative"', 'class="activity-appbar w-full h-16 bg-primary relative"');
+    await replace('client/components/app/Appbar.vue', '      <div class="flex h-full items-center">', `      <div class="flex h-full items-center">
+        <button v-if="$activity" type="button" class="activity-back-button" aria-label="Back" title="Back" @click="$activity.back()">
+          <span class="material-symbols text-2xl" aria-hidden="true">arrow_back</span>
+        </button>`);
+    await replace('client/components/app/Appbar.vue', '<controls-global-search v-if="currentLibrary" class="mr-1 sm:mr-0"', '<controls-global-search v-if="currentLibrary" class="activity-global-search mr-1 sm:mr-0"');
+    await replace('client/components/app/Appbar.vue', 'class="relative w-9 h-9 md:w-32', 'class="activity-account-button relative w-9 h-9 md:w-32');
+    await replace('client/components/app/Appbar.vue', '        <nuxt-link to="/account"', `        <button v-if="$activity" type="button" class="activity-party-button" aria-label="Listening party" title="Listening party" aria-haspopup="dialog" :aria-expanded="$activity.state.rosterOpen" @click="$activity.roster()">
+          <span class="material-symbols text-2xl" aria-hidden="true">groups</span>
+        </button>
+        <nuxt-link to="/account"`);
+    await replace('client/layouts/default.vue', '<div class="text-white max-h-screen h-screen overflow-hidden bg-bg">', '<div class="activity-shell text-white bg-bg" :class="{ \'activity-preview\': $activity.state.preview, \'activity-playing\': !!$store.state.streamLibraryItem }">');
     await replace('client/layouts/default.vue', '    <app-appbar />', '    <app-appbar />\n    <discord-activity-controls />');
     await replace('client/layouts/default.vue', '<Nuxt :key="currentLang" />', `<Nuxt :key="String(currentLang) + ':' + $activity.state.accountRevision + ':' + $activity.state.browseRevision" />`);
     await replace('client/layouts/default.vue', '<app-media-player-container ref="mediaPlayerContainer" />', '<app-media-player-container :key="$activity.state.accountRevision" ref="mediaPlayerContainer" />');
     await replace('client/layouts/default.vue', '    this.initializeSocket()', '    // Activity uses its capability-scoped socket and filtered native events.');
     await replace('client/layouts/default.vue', '    this.checkVersionUpdate()', '    // Native releases are pinned and updated by the Activity operator.');
     await replace('client/layouts/default.vue', '    this.loadTasks()', '    // Administrative tasks are outside the listening Activity.');
-    await replace('client/layouts/default.vue', '    $route(newVal) {', "    '$activity.state.preview'(value) { document.body.classList.toggle('activity-preview', value) },\n    $route(newVal) {");
 
     const component = 'client/components/app/MediaPlayerContainer.vue';
+    await replace(component, 'class="w-full fixed bottom-0', 'class="activity-native-player w-full fixed bottom-0');
+    await replace(component, 'class="absolute left-2 top-2 lg:left-4 cursor-pointer"', 'class="activity-player-cover absolute left-2 top-2 lg:left-4 cursor-pointer"');
+    await replace(component, 'class="flex items-start mb-6 lg:mb-0"', 'class="activity-player-heading flex items-start mb-6 lg:mb-0"');
+    await replace('client/components/player/PlayerUi.vue', 'class="w-full -mt-6"', 'class="activity-player-ui w-full -mt-6"');
+    await replace('client/components/player/PlayerUi.vue', 'class="absolute -top-10 lg:top-0', 'class="activity-player-options absolute -top-10 lg:top-0');
+    await replace('client/components/modals/Modal.vue', 'style="min-width: 380px; min-height: 200px; max-width: 100vw"', 'style="min-width: min(380px, 100vw); min-height: min(200px, 60dvh); max-width: 100vw; max-height: calc(100dvh - 60px); overflow-y: auto"');
     const hooks = {
         'mediaFinished(libraryItemId, episodeId)': 'ended(libraryItemId, episodeId)',
         'playPause()': 'playPause()',
@@ -92,6 +109,7 @@ export async function integrate(replace) {
     await replace('client/store/index.js', '  addItemToQueue(state, item) {', '  addItemToQueue(state, item) {\n    state.playerQueueItems.push({ ...item }); return // Activity queue entries have independent identities.');
     await replace('client/store/index.js', '  removeItemFromQueue(state, item) {', '  removeItemFromQueue(state, item) {\n    if (item.activityEntryId) { state.playerQueueItems = state.playerQueueItems.filter(value => value.activityEntryId !== item.activityEntryId); return }');
     await replace('client/components/modals/player/QueueItemRow.vue', '    isOpenInPlayer() {', '    isOpenInPlayer() {\n      if (this.$activity?.state.snapshot) return this.item.activityEntryId === this.$activity.state.snapshot.queue[this.$activity.state.snapshot.index]?.id');
+    await replace('client/components/modals/player/QueueItemRow.vue', 'class="w-full flex items-center px-4 py-2"', 'class="activity-queue-item w-full flex items-center px-4 py-2"');
     await replace('client/components/modals/player/QueueItemRow.vue', '    <div class="w-28">', `    <div v-if="$activity" class="activity-queue-actions" @click.stop>
       <button v-if="!isOpenInPlayer" @click="playClick">Play</button>
       <button v-if="!isOpenInPlayer" @click="$activity.player.playNext(item.activityEntryId)">Play next</button>
@@ -107,11 +125,21 @@ export async function integrate(replace) {
             <button @click="$activity.player.shuffleQueue()">Shuffle</button>
             <button @click="$activity.player.clearUpcoming()">Clear upcoming</button>
           </div>`);
+    await replace('client/components/modals/player/QueueItemsModal.vue', '        <div class="pb-4 px-4 flex items-center">', '        <div class="activity-queue-header pb-4 px-4 flex items-center">');
+    await replace('client/components/modals/player/QueueItemsModal.vue', '        <modals-player-queue-item-row', `        <div v-if="$activity && $activity.state.snapshot" class="activity-queue-controls">
+          <button aria-label="Previous item" :disabled="$activity.state.snapshot.index <= 0" @click="$activity.player.previous()">Previous</button>
+          <button aria-label="Next item" :disabled="$activity.state.snapshot.index < 0 || $activity.state.snapshot.index >= $activity.state.snapshot.queue.length - 1" @click="$activity.player.next()">Next</button>
+          <label>Repeat
+            <select aria-label="Party repeat mode" :value="$activity.state.snapshot.repeatMode" @change="$activity.player.repeat($event.target.value)">
+              <option value="RepeatNone">No repeat</option><option value="RepeatOne">Repeat one</option><option value="RepeatAll">Repeat all</option>
+            </select>
+          </label>
+        </div>
+        <modals-player-queue-item-row`);
     await replace('client/pages/item/_id/index.vue', '            <ui-tooltip v-if="showQueueBtn"', `            <ui-btn v-if="$activity && showPlayButton && !isPodcast" small class="mr-2" @click="$activity.player.queueSelection({ libraryItemId })">Play next</ui-btn>
             <ui-tooltip v-if="showQueueBtn"`);
     await replace('client/components/tables/podcast/LazyEpisodeRow.vue', '          <ui-tooltip v-if="libraryItemIdStreaming', `          <button v-if="$activity" class="px-2 text-sm" @click.stop="$activity.player.queueSelection({ libraryItemId, episodeId })">Play next</button>
           <ui-tooltip v-if="libraryItemIdStreaming`);
-    await replace('client/components/app/SideRail.vue', '      return 64', '      return 102');
     await replace('client/pages/item/_id/index.vue', '    showReadButton() {\n      return this.ebookFile', '    showReadButton() {\n      return false');
     for (const event of ['item_updated', 'rss_feed_open', 'rss_feed_closed', 'share_open', 'share_closed', 'episode_download_queued', 'episode_download_started', 'episode_download_finished', 'episode_download_queue_cleared']) {
         for (const method of ['on', 'off']) await replace('client/pages/item/_id/index.vue', `this.$root.socket.${method}('${event}'`, `this.$root.socket?.${method}('${event}'`);

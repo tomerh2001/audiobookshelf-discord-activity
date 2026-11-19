@@ -4,7 +4,7 @@ import { createRequire } from 'node:module';
 import { createNativePlayer } from '../src/nativePlaybackAdapter.js';
 const { JSDOM } = createRequire(new URL('../../apps/activity-web/package.json', import.meta.url))('jsdom');
 const flush = () => new Promise(resolve => setImmediate(resolve));
-function fixture({ getItem, finished = false, initialPlaying = false, initialReadyState = 4 } = {}) {
+function fixture({ getItem, finished = false, initialPlaying = false, initialReadyState = 4, onDiagnostic } = {}) {
     const { window } = new JSDOM('<body></body>', { url: 'https://activity.example/' });
     const previous = { window: globalThis.window, document: globalThis.document, fetch: globalThis.fetch };
     globalThis.window = window; globalThis.document = window.document;
@@ -44,7 +44,7 @@ function fixture({ getItem, finished = false, initialPlaying = false, initialRea
     } } } };
     globalThis.fetch = async () => ({ ok: true, json: async () => ({ snapshot: state, clientId: 'viewer', sequence: 0 }) });
     const component = { playerHandler: handlers, $store: store, $refs: { audioPlayer: { checkUpdateChapterTrack() {} } }, $nextTick: callback => callback(), $axios: { $get: getItem || (async path => ({ id: path.split('/')[3].split('?')[0], media: { metadata: { title: 'Book' }, episodes: [{ id: 'ep-1', title: 'Episode One' }] } })) } };
-    const adapter = createNativePlayer({ component, socket, baseUrl: '/abs/fixture', presence: { update: value => presences.push(value), clear: () => presenceClears++ }, onError: value => errors.push(value), onBlocked: value => blocked.push(value) });
+    const adapter = createNativePlayer({ component, socket, baseUrl: '/abs/fixture', presence: { update: value => presences.push(value), clear: () => presenceClears++ }, onError: value => errors.push(value), onBlocked: value => blocked.push(value), onDiagnostic });
     return { adapter, commands, events, loads, handlers, errors, blocked, window, presences, get presenceClears() { return presenceClears; },
         playing() { handlers.audioPaused = false; handlers.playerPlaying = true; handlers.player.player.dispatchEvent(new window.Event('playing')); },
         close() { adapter.dispose(); window.close(); Object.assign(globalThis, previous); } };
@@ -120,6 +120,19 @@ test('podcast presence includes episode and show titles', async () => {
     try {
         await f.adapter.start(); await f.adapter.playSelection({ libraryItemId: 'podcast-one', episodeId: 'ep-1' }); await flush(); f.playing();
         assert.equal(f.presences.at(-1)?.kind, 'podcast'); assert.equal(f.presences.at(-1)?.title, 'Episode One'); assert.equal(f.presences.at(-1)?.seriesName, 'Book');
+    } finally { f.close(); }
+});
+test('diagnostics distinguish idle from observed playback without exposing metadata and cannot interrupt audio', async () => {
+    const diagnostics = [];
+    const f = fixture({ onDiagnostic: value => { diagnostics.push(value); throw new Error('Diagnostic observer unavailable'); } });
+    try {
+        await f.adapter.start(); await new Promise(resolve => setTimeout(resolve, 1050));
+        assert.deepEqual(diagnostics.at(-1), { event: 'observer', reason: 'no_entry', playing: false, titlePresent: false });
+        await f.adapter.playSelection({ libraryItemId: 'book-one' }); await flush(); f.playing();
+        assert.deepEqual(diagnostics.at(-1), { event: 'observer', reason: 'ready', playing: true, titlePresent: true, audioReadyState: 4 });
+        assert.equal(f.presences.at(-1)?.title, 'Book');
+        assert.doesNotMatch(JSON.stringify(diagnostics), /Book|book-one|fixture/);
+        assert.deepEqual(f.errors, []);
     } finally { f.close(); }
 });
 test('a missed playing event recovers actual audible playback; blocked autoplay never claims playback', async () => {
