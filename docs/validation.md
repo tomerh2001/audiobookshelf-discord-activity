@@ -4,6 +4,10 @@ The Audiobookshelf adaptation is implemented in a separate checkout based on Jel
 
 ## Listening experience follow-up
 
+### Paused Discord status
+
+A real listener confirmed the profile title after the compact-view/recovery release. Live diagnostics also showed playing updates acknowledged with a title and intervening paused updates rejected with RPC `4000`. The formatter now omits inactive timestamps instead of sending `null`, and diagnostics identify the timer state of each set request. The installed-SDK transport regression covers playing, paused, buffering and resumed playback at a changed speed. The documentation permits nullable fields, so this is a narrow response to the observed rejection, not proof that Discord universally rejects null timestamps. Real paused-state acceptance still needs separate verification.
+
 ### Compact views and interrupted sessions
 
 The follow-up removes the extra controls row, puts the party button and Back in the native app bar, and places previous/next/repeat in the native queue dialog. Browsing and dialogs have bounded scroll areas, and the compact player uses the initial presentation state. Queue navigation is disabled when no neighboring item exists; fullscreen is offered only when the document supports it.
