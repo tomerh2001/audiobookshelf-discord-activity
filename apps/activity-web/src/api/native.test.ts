@@ -1,41 +1,40 @@
 import { afterEach, expect, it, vi } from "vitest";
-import { connectAccount, getConnections, getParty, joinParty, launchNative, matchesPartyServer, deleteConnection, pollOidcLogin, saveNativeRestore } from "./native.js";
+import { connectAccount, getConnections, getParty, joinParty, launchNative, matchesPartyServer, deleteConnection, pollOidcLogin, startOidcLogin, saveNativeRestore } from "./native.js";
 import { onSessionRejected } from "./sessionRecovery.js";
 
-const connection = { id: "account", serverUrl: "https://audiobookshelf.test", serverId: "server", serverName: "Library", audiobookshelfUserId: "jf-user", audiobookshelfUsername: "Viewer", kind: "personal", createdAt: "2026-09-08", updatedAt: "2026-09-08" };
-const party = { id: "party", instanceId: "instance", serverId: "server", serverUrl: "https://audiobookshelf.test", groupId: "group" };
+const connection = { id: "account", serverId: "server", audiobookshelfUserId: "jf-user", audiobookshelfUsername: "Viewer", kind: "personal", createdAt: "2026-09-08", updatedAt: "2026-09-08" };
+const party = { id: "party", instanceId: "instance", serverId: "server", groupId: "group" };
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
-it("keeps the public login address separate from canonical saved-account and party matching", async () => {
-  const response = {
-    connections: [{ ...connection, serverUrl: "http://audiobookshelf:8096" }],
-    defaultServerUrl: "https://audiobookshelf.example.com", canonicalDefaultServerUrl: "http://audiobookshelf:8096",
-    communityAvailable: true, preferredConnectionId: connection.id
-  };
+it("loads account metadata and available sign-in methods without an upstream address", async () => {
+  const response = { connections: [connection], communityAvailable: true, passwordEnabled: false, oidcEnabled: true, preferredConnectionId: connection.id };
   const fetcher = vi.fn().mockResolvedValue(Response.json(response)); vi.stubGlobal("fetch", fetcher);
-  expect(await getConnections("app-token")).toEqual({ ...response, oidcEnabled: false });
-  expect(fetcher).toHaveBeenCalledExactlyOnceWith("/api/connections", expect.objectContaining({
-    method: "GET", headers: { Authorization: "Bearer app-token" }
-  }));
+  expect(await getConnections("app-token")).toEqual(response);
+});
+
+it("starts SSO without requiring or accepting a server address", async () => {
+  const response = { id: "attempt", url: "https://listen.example/api/connections/oidc/start/attempt", expiresAt: "2026-11-19T23:00:00Z" };
+  const fetcher = vi.fn().mockResolvedValue(Response.json(response)); vi.stubGlobal("fetch", fetcher);
+  expect(await startOidcLogin("app-token")).toEqual(response);
+  expect(fetcher).toHaveBeenCalledWith("/api/connections/oidc", expect.objectContaining({ method: "POST", body: "{}" }));
 });
 
 it("sends Audiobookshelf credentials only in an authenticated broker POST, never its URL or a direct upstream request", async () => {
   const fetcher = vi.fn().mockResolvedValue(Response.json({ connection })); vi.stubGlobal("fetch", fetcher);
-  const input = { serverUrl: connection.serverUrl, username: "Viewer", password: "fixture-password" };
+  const input = { username: "Viewer", password: "fixture-password" };
   await expect(connectAccount("app-token", input)).resolves.toEqual(connection);
   expect(fetcher).toHaveBeenCalledExactlyOnceWith("/api/connections", expect.objectContaining({
     method: "POST", headers: { Authorization: "Bearer app-token", "Content-Type": "application/json" }, body: JSON.stringify(input), signal: expect.any(AbortSignal)
   }));
 });
 
-it("retains explicit party binding and requires both server identity and URL to match", async () => {
+it("retains explicit party binding using the opaque server identity", async () => {
   const fetcher = vi.fn().mockResolvedValueOnce(Response.json({ party: null })).mockResolvedValueOnce(Response.json({ party }));
   vi.stubGlobal("fetch", fetcher);
   expect(await getParty("app-token")).toBeNull();
   expect(await joinParty("app-token", "account")).toEqual(party);
   expect(fetcher.mock.calls[1]).toEqual(["/api/party", expect.objectContaining({ method: "POST", body: JSON.stringify({ connectionId: "account" }) })]);
   expect(matchesPartyServer({ ...connection, kind: "personal" }, party)).toBe(true);
-  expect(matchesPartyServer({ ...connection, kind: "personal", serverUrl: "https://other.test" }, party)).toBe(false);
   expect(matchesPartyServer({ ...connection, kind: "personal", serverId: "different" }, party)).toBe(false);
 });
 
@@ -92,7 +91,7 @@ it("surfaces ingress/bearer rejection to the native retry UI without renewing Di
       await expect(getParty("current-session")).rejects.toMatchObject({ recoveryRequired: true });
     }
     fetcher.mockResolvedValueOnce(Response.json({ error: { code: "audiobookshelf_login_failed", message: "Check your Audiobookshelf password." } }, { status: 401 }));
-    const error = await connectAccount("current-session", { serverUrl: connection.serverUrl, username: "Viewer", password: "wrong" }).catch((value: unknown) => value);
+    const error = await connectAccount("current-session", { username: "Viewer", password: "wrong" }).catch((value: unknown) => value);
     expect(error).toBeInstanceOf(Error);
     expect(error).toHaveProperty("message", "Check your Audiobookshelf password.");
     expect(error).not.toHaveProperty("recoveryRequired");

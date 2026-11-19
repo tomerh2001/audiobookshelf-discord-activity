@@ -10,7 +10,7 @@ export function createNativePlayer({ component: ctx, socket, baseUrl, presence, 
     let closed = false, generation = 0, loadingIdentity = '', selectedIdentity = '', snapshot, suppressQueue = false;
     let pendingEffect, driftSeekAt = 0, stableSince = 0, sleeping = false, blocked = false, audio, played = false, buffering = false;
     const metadata = new Map(), itemCache = new Map(), itemPending = new Map();
-    let queueHydration = 0;
+    let queueHydration = 0, cacheRevision = 0;
     const engine = createActivityPlaybackClient({ baseUrl, apiClient: socket, apply, onError });
     const commit = (name, payload) => { suppressQueue = true; try { store.commit(name, payload); } finally { suppressQueue = false; } };
     const submit = (value, options) => { const promise = engine.submit(value, options); void promise.catch(() => {}); return promise; };
@@ -18,7 +18,11 @@ export function createNativePlayer({ component: ctx, socket, baseUrl, presence, 
     function currentAudio() { return handler.player?.player; }
     async function loadItem(id) {
         if (itemCache.has(id)) return itemCache.get(id);
-        if (!itemPending.has(id)) itemPending.set(id, ctx.$axios.$get(`/api/items/${encodeURIComponent(id)}?expanded=1`).then(item => { if (!closed) itemCache.set(id, item); return item; }).finally(() => itemPending.delete(id)));
+        if (!itemPending.has(id)) {
+            const revision = cacheRevision;
+            const request = ctx.$axios.$get(`/api/items/${encodeURIComponent(id)}?expanded=1`).then(item => { if (!closed && revision === cacheRevision) itemCache.set(id, item); return item; }).finally(() => { if (itemPending.get(id) === request) itemPending.delete(id); });
+            itemPending.set(id, request);
+        }
         return itemPending.get(id);
     }
     function nativeMetadata(item, episodeId) {
@@ -40,6 +44,15 @@ export function createNativePlayer({ component: ctx, socket, baseUrl, presence, 
     function queueForNative(queue) {
         return queue.map(entry => ({ ...(metadata.get(`${entry.itemId}:${entry.episodeId || ''}`) || {}),
             activityEntryId: entry.id, libraryItemId: entry.itemId, ...(entry.episodeId ? { episodeId: entry.episodeId } : {}) }));
+    }
+    function replaceQueue(queue) {
+        const current = engine.getSnapshot();
+        if (!current) return;
+        if (!queue.length) return submit({ type: 'stop' });
+        const active = current.queue[current.index];
+        const selected = queue.findIndex(entry => entry.id === active?.id);
+        return submit({ type: 'setQueue', queue, index: Math.max(0, selected),
+            positionTicks: selected < 0 ? 0 : current.positionTicks, paused: current.paused });
     }
     function apply(next, effect = {}) {
         if (closed) return;
@@ -115,18 +128,25 @@ export function createNativePlayer({ component: ctx, socket, baseUrl, presence, 
         const latest = engine.getSnapshot();
         if (latest?.paused || sleeping) handler.pause();
         if (pendingEffect && latest) { const effect = pendingEffect; pendingEffect = undefined; synchronize(latest, effect); }
+        tick();
     }
     function onLoadedMetadata() {
         const latest = engine.getSnapshot();
         if (latest && pendingEffect) { const effect = pendingEffect; pendingEffect = undefined; synchronize(latest, effect); }
     }
-    function onWaiting() { buffering = true; stableSince = now(); }
+    function onWaiting() { buffering = true; stableSince = now(); tick(); }
     function onBlockedEvent(event) { if (event.target === currentAudio()) setBlocked(true); }
     function observeAudio() {
         const next = currentAudio();
         if (next === audio) return;
         if (audio) { audio.removeEventListener('playing', onPlaying); audio.removeEventListener('waiting', onWaiting); audio.removeEventListener('loadedmetadata', onLoadedMetadata); }
-        audio = next; played = false; buffering = false;
+        audio = next;
+        // A native player may already be audible when its Activity observer attaches.
+        // Recover from actual media state, never from a requested play or queue state.
+        // ABS retains PLAYING during a stall; HAVE_CURRENT_DATA alone is not
+        // enough when this observer also missed the element's waiting event.
+        played = Boolean(audio && !audio.paused && !audio.ended && audio.readyState >= 3 && handler.playerPlaying);
+        buffering = false;
         if (audio) { audio.addEventListener('playing', onPlaying); audio.addEventListener('waiting', onWaiting); audio.addEventListener('loadedmetadata', onLoadedMetadata); }
     }
     function tick() {
@@ -151,7 +171,10 @@ export function createNativePlayer({ component: ctx, socket, baseUrl, presence, 
             else handler.setPlaybackRate(buffered && Math.abs(drift) > 0.25 ? rate * (drift > 0 ? 1.03 : 0.97) : rate);
         }
         if (played && audio && !audio.ended && handler.libraryItem) {
-            presence?.update({ kind: 'audio', title: handler.displayTitle || handler.libraryItem.media?.metadata?.title || 'Audiobook',
+            const episode = entry.episodeId && handler.libraryItem.media?.episodes?.find(value => value.id === entry.episodeId);
+            presence?.update({ kind: episode ? 'podcast' : 'audio',
+                title: episode?.title || handler.displayTitle || handler.libraryItem.media?.metadata?.title || 'Audiobook',
+                ...(episode ? { seriesName: handler.libraryItem.media?.metadata?.title } : {}),
                 positionMs: actual * 1000, durationMs: handler.getDuration() * 1000, paused: audio.paused, buffering,
                 playbackRate: rate });
         } else presence?.clear();
@@ -161,14 +184,60 @@ export function createNativePlayer({ component: ctx, socket, baseUrl, presence, 
     const unsubscribe = store.subscribe(mutation => {
         if (closed || suppressQueue || !snapshot || !['setPlayerQueueItems', 'addItemToQueue', 'removeItemFromQueue'].includes(mutation.type)) return;
         const queue = (store.state.playerQueueItems || []).map(item => ({ id: item.activityEntryId || randomId(), itemId: item.libraryItemId, ...(item.episodeId ? { episodeId: item.episodeId } : {}) }));
-        const selected = snapshot.queue[snapshot.index];
-        const index = queue.findIndex(entry => entry.id === selected?.id);
-        if (!queue.length) submit({ type: 'stop' });
-        else submit({ type: 'setQueue', queue, index: Math.max(0, index), positionTicks: index < 0 ? 0 : snapshot.positionTicks, paused: snapshot.paused });
+        replaceQueue(queue);
     });
     return {
         start: () => engine.start(),
         getSnapshot: () => engine.getSnapshot(),
+        invalidateItems(ids) {
+            cacheRevision++; queueHydration++;
+            if (!ids) { itemCache.clear(); itemPending.clear(); metadata.clear(); }
+            else for (const id of ids) { itemCache.delete(id); itemPending.delete(id); for (const key of metadata.keys()) if (key.startsWith(`${id}:`)) metadata.delete(key); }
+            if (snapshot) void hydrateQueue(snapshot.queue);
+        },
+        queueSelection(payload, mode = 'next') {
+            if (!payload?.libraryItemId) return;
+            const current = engine.getSnapshot();
+            if (!current?.queue.length) return this.playSelection(payload);
+            const values = payload.queueItems?.length ? payload.queueItems : [payload];
+            const additions = values.map(item => {
+                metadata.set(`${item.libraryItemId}:${item.episodeId || ''}`, item);
+                return { id: randomId(), itemId: item.libraryItemId, ...(item.episodeId ? { episodeId: item.episodeId } : {}) };
+            });
+            const queue = [...current.queue];
+            queue.splice(mode === 'next' ? current.index + 1 : queue.length, 0, ...additions);
+            return replaceQueue(queue);
+        },
+        moveQueueItem(id, index) {
+            const queue = [...engine.getSnapshot()?.queue || []];
+            const from = queue.findIndex(entry => entry.id === id);
+            if (from < 0 || !Number.isInteger(index) || index < 0 || index >= queue.length || from === index) return;
+            queue.splice(index, 0, queue.splice(from, 1)[0]);
+            return replaceQueue(queue);
+        },
+        playNext(id) {
+            const current = engine.getSnapshot();
+            const active = current?.queue[current.index];
+            if (!active || active.id === id) return;
+            const queue = current.queue.filter(entry => entry.id !== id), entry = current.queue.find(value => value.id === id);
+            if (!entry) return;
+            queue.splice(queue.findIndex(value => value.id === active.id) + 1, 0, entry);
+            return replaceQueue(queue);
+        },
+        clearUpcoming() {
+            const current = engine.getSnapshot(), entry = current?.queue[current.index];
+            if (entry) return replaceQueue([entry]);
+        },
+        shuffleQueue() {
+            const current = engine.getSnapshot(), active = current?.queue[current.index];
+            if (!active) return;
+            const queue = current.queue.filter(entry => entry.id !== active.id);
+            for (let index = queue.length - 1; index > 0; index--) {
+                const target = Math.floor(Math.random() * (index + 1));
+                [queue[index], queue[target]] = [queue[target], queue[index]];
+            }
+            return replaceQueue([active, ...queue]);
+        },
         playSelection(payload) {
             if (!payload?.libraryItemId) return;
             sleeping = false;

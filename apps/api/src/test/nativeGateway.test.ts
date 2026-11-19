@@ -372,6 +372,60 @@ describe("native Audiobookshelf HTTP gateway", () => {
 });
 
 describe("native sockets and room lifecycle", () => {
+  it.each(["author_updated", "collection_removed", "series_removed"])("invalidates browsing for %s without leaking its metadata", async event => {
+    const current = await launch(); const socket = await connect(current.data); const frames: Frame[] = [];
+    socket.on("message", value => frames.push(JSON.parse(value.toString())));
+    io.emit(event, { id: "private-id", name: "private-name", token: TOKEN });
+    await eventually(() => frames.some(frame => frame.Data.event === "library_changed"));
+    expect(frames.filter(frame => frame.MessageType === "AudiobookshelfEvent")).toEqual([
+      { MessageType: "AudiobookshelfEvent", Data: { event: "library_changed", payload: {} } }
+    ]);
+    socket.terminate();
+  });
+
+  it("coalesces native item events into fresh per-account invalidations without forwarding metadata", async () => {
+    const first = await launch(); const second = await launch(await actor("viewer-2"));
+    const one = await connect(first.data); const two = await connect(second.data);
+    const oneFrames: Frame[] = []; const twoFrames: Frame[] = [];
+    one.on("message", value => oneFrames.push(JSON.parse(value.toString())));
+    two.on("message", value => twoFrames.push(JSON.parse(value.toString())));
+    // A previously granted cache entry must not permit a later restricted event.
+    await service.requireItem(second.viewer, ITEM); deniedForUser.add(OTHER);
+    const before = calls.length;
+    for (let i = 0; i < 20; i++) io.emit("item_updated", { id: ITEM, media: { metadata: { title: "private-event-title" } }, token: TOKEN });
+    io.emit("items_added", [{ id: NEXT, path: "/private/book" }, { id: DENIED }, { id: "../invalid" }]);
+    await eventually(() => oneFrames.some(frame => frame.Data.event === "library_changed") && twoFrames.some(frame => frame.Data.event === "library_changed"));
+    expect(oneFrames.filter(frame => frame.Data.event === "items_changed")).toEqual([
+      { MessageType: "AudiobookshelfEvent", Data: { event: "items_changed", payload: { itemIds: expect.arrayContaining([ITEM, NEXT]) } } }
+    ]);
+    expect(twoFrames.some(frame => frame.Data.event === "items_changed")).toBe(false);
+    expect(second.viewer.itemAccess.has(ITEM)).toBe(false);
+    expect(calls.slice(before).filter(call => call.path === `/api/items/${ITEM}`)).toHaveLength(2);
+    expect(JSON.stringify([...oneFrames, ...twoFrames])).not.toMatch(/private-event-title|\/private\/|22222222|\.\.\/invalid/);
+    expect(JSON.stringify([...oneFrames, ...twoFrames])).not.toContain(TOKEN);
+    one.terminate(); two.terminate();
+  });
+
+  it("uses content-free removal/library invalidations and drops reads completed after revocation", async () => {
+    const current = await launch(); const socket = await connect(current.data); const frames: Frame[] = [];
+    socket.on("message", value => frames.push(JSON.parse(value.toString())));
+    await service.requireItem(current.viewer, ITEM);
+    io.emit("item_removed", { id: ITEM, media: { metadata: { title: "removed-private-title" } } });
+    io.emit("library_removed", { id: "private-library", name: "Private library", folders: [{ path: "/private" }] });
+    await eventually(() => frames.some(frame => frame.Data.event === "library_changed"));
+    expect(frames.filter(frame => frame.MessageType === "AudiobookshelfEvent")).toEqual([
+      { MessageType: "AudiobookshelfEvent", Data: { event: "library_changed", payload: {} } }
+    ]);
+    expect(current.viewer.itemAccess.has(ITEM)).toBe(false);
+    itemDelay = 100;
+    io.emit("item_added", { id: NEXT, token: TOKEN });
+    await eventually(() => calls.some(call => call.path === `/api/items/${NEXT}`));
+    await service.revoke(current.viewer);
+    await new Promise(resolve => setTimeout(resolve, 150));
+    expect(frames.filter(frame => frame.MessageType === "AudiobookshelfEvent")).toHaveLength(1);
+    socket.terminate();
+  });
+
   it("forwards only current-account bookmark and playlist updates and hides transcoder details", async () => {
     const current = await launch(); const socket = await connect(current.data); const session = await start(current, true);
     const frames: Frame[] = [];

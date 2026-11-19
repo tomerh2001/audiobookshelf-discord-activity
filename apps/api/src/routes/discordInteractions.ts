@@ -1,8 +1,9 @@
 import type { FastifyInstance, FastifyPluginAsync } from "fastify";
+import { randomBytes } from "node:crypto";
 import { z } from "zod";
 import { allowedDiscordActor, verifyDiscordActivityContext } from "../services/discord.js";
 import { verifyInteractionSignature } from "../services/interactionSignature.js";
-import { getNativePartyService } from "../services/nativeParty.js";
+import { getNativePartyService, type NativePartyService, type NativeViewer } from "../services/nativeParty.js";
 
 const optionSchema = z.object({ name: z.string(), value: z.union([z.string(), z.number(), z.boolean()]).optional() });
 const interactionSchema = z.object({
@@ -78,8 +79,47 @@ class CommandError extends Error {}
 
 const mediaSchema = z.object({
   id: z.string().regex(/^[a-zA-Z0-9_-]{1,64}$/),
-  media: z.object({ metadata: z.object({ title: z.string().min(1), authorName: z.string().optional() }) })
+  mediaType: z.enum(["book", "podcast"]).optional(),
+  media: z.object({ metadata: z.object({ title: z.string().min(1), authorName: z.string().optional(), author: z.string().optional() }) }),
+  recentEpisode: z.object({ id: z.string().regex(/^[a-zA-Z0-9_-]{1,64}$/), title: z.string().min(1) }).optional()
 });
+type Media = z.infer<typeof mediaSchema>;
+// Discord option values have a 100-character ceiling. Keep opaque choices
+// scoped to this renderer/account instead of squeezing two upstream IDs into it.
+const choices = new WeakMap<NativeViewer, Map<string, { media: Media; expiresAt: number }>>();
+function parseMedia(result: unknown): Media[] {
+  return z.object({ items: z.array(z.unknown()) }).parse(result).items.flatMap(item => {
+    const parsed = mediaSchema.safeParse(item); return parsed.success ? [parsed.data] : [];
+  }).slice(0, 25);
+}
+function mediaTitle(item: Media): string {
+  return item.recentEpisode ? `${item.media.metadata.title} — ${item.recentEpisode.title}` : item.media.metadata.title;
+}
+async function selectMedia(parties: NativePartyService, viewer: NativeViewer, item: Media): Promise<Message> {
+  if (item.mediaType === "podcast" && !item.recentEpisode) {
+    const result = await parties.command(viewer, "episodes", { itemIds: [item.id] });
+    const episodes = parseMedia(result).filter(entry => !!entry.recentEpisode);
+    if (!episodes.length) return { content: "This podcast has no available episodes. Browse Audiobookshelf in the Activity." };
+    return mediaChoices(parties, viewer, episodes, "Choose an episode (up to 25 newest; browse the Activity for more):");
+  }
+  await parties.command(viewer, "select", { items: [{ itemId: item.id, ...(item.recentEpisode ? { episodeId: item.recentEpisode.id } : {}) }] });
+  return { content: `Selected ${mediaTitle(item)} for everyone.` };
+}
+async function mediaChoices(parties: NativePartyService, viewer: NativeViewer, items: Media[], prompt: string): Promise<Message> {
+  if (items.length === 1) return selectMedia(parties, viewer, items[0]!);
+  let records = choices.get(viewer);
+  if (!records) { records = new Map(); choices.set(viewer, records); }
+  for (const [id, value] of records) if (value.expiresAt <= Date.now()) records.delete(id);
+  if (records.size + items.length > 100) records.clear();
+  const options = items.map(item => {
+    const id = randomBytes(16).toString("hex"); records!.set(id, { media: item, expiresAt: Date.now() + 300_000 });
+    return { label: (item.recentEpisode?.title ?? item.media.metadata.title).slice(0, 100), value: id,
+      description: (item.recentEpisode ? item.media.metadata.title
+        : item.media.metadata.authorName || item.media.metadata.author || (item.mediaType === "podcast" ? "Podcast — choose an episode" : "Audiobook")).slice(0, 100) };
+  });
+  return { content: prompt, components: [{ type: 1, components: [{ type: 3,
+    custom_id: `audiobookshelf:select:${viewer.partyId}`, placeholder: "Select an audiobook or episode", options }] }] };
+}
 
 export async function runControl(app: FastifyInstance, interaction: Interaction, userId: string): Promise<Message> {
   const env = app.envConfig;
@@ -103,33 +143,23 @@ export async function runControl(app: FastifyInstance, interaction: Interaction,
       .parse(await parties.command(viewer, "now"));
     return { content: current.title
       ? `${current.title}: ${current.isPaused ? "paused" : "playing"} at ${Math.floor(current.positionSeconds)} seconds.`
-      : "No audiobook is playing yet. Pick something in Audiobookshelf." };
+      : "Nothing is playing yet. Pick an audiobook or podcast in Audiobookshelf." };
   }
   if (action === "select") {
     if (interaction.data?.custom_id !== `audiobookshelf:select:${party.id}`) {
       throw new CommandError("That selection belongs to an earlier listening party. Search again with /audiobookshelf play.");
     }
-    const itemId = interaction.data.values?.[0];
-    if (!itemId || !/^[a-zA-Z0-9_-]{1,64}$/.test(itemId)) throw new CommandError("Invalid selection. Search again with /audiobookshelf play.");
-    await parties.command(viewer, "select", { itemIds: [itemId] });
-    return { content: "Selected for everyone. The listening party is preparing playback." };
+    const id = interaction.data.values?.[0];
+    const choice = id && /^[a-f0-9]{32}$/.test(id) ? choices.get(viewer)?.get(id) : undefined;
+    if (!choice || choice.expiresAt <= Date.now()) throw new CommandError("That selection expired. Search again with /audiobookshelf play.");
+    return selectMedia(parties, viewer, choice.media);
   }
   if (action === "play") {
     const query = subcommand?.options?.find((option) => option.name === "query")?.value;
-    if (typeof query !== "string" || !query.trim() || query.length > 200) throw new CommandError("Enter a audiobook title.");
-    const result = z.object({ items: z.array(z.unknown()) }).parse(await parties.command(viewer, "search", { query }));
-    const items = result.items.flatMap((item) => { const parsed = mediaSchema.safeParse(item); return parsed.success ? [parsed.data] : []; }).slice(0,25);
-    if (!items.length) return { content: "No matching audiobooks. Try another title or browse Audiobookshelf in the Activity." };
-    if (items.length === 1) {
-      await parties.command(viewer, "select", { itemIds: [items[0]!.id] });
-      return { content: `Selected ${items[0]!.media.metadata.title} for everyone.` };
-    }
-    return { content: "Choose an audiobook:", components: [{ type: 1, components: [{
-      type: 3, custom_id: `audiobookshelf:select:${party.id}`, placeholder: "Select an audiobook", options: items.map((item) => ({
-        label: item.media.metadata.title.slice(0, 100), value: item.id,
-        description: (item.media.metadata.authorName || "Audiobook").slice(0, 100)
-      }))
-    }] }] };
+    if (typeof query !== "string" || !query.trim() || query.length > 200) throw new CommandError("Enter an audiobook, podcast or episode title.");
+    const items = parseMedia(await parties.command(viewer, "search", { query }));
+    if (!items.length) return { content: "No matching audiobooks or podcasts. Try another title or browse Audiobookshelf in the Activity." };
+    return mediaChoices(parties, viewer, items, "Choose an audiobook, podcast or episode:");
   }
   if (action === "seek") {
     const seconds = subcommand?.options?.find((option) => option.name === "seconds")?.value;

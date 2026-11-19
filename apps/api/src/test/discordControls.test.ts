@@ -25,7 +25,7 @@ async function setup() {
   apps.push(app);
   const service = getNativePartyService(app);
   const party = { id: "current-party", context } as NativeParty;
-  const viewer = { discordUserId: memberId } as NativeViewer;
+  const viewer = { discordUserId: memberId, partyId: party.id } as NativeViewer;
   const find = vi.spyOn(service,"getPartyForChannel").mockImplementation((guild,channel) => guild === guildId && channel === channelId ? party : undefined);
   const member = vi.spyOn(service,"getViewerForDiscordUser").mockImplementation((id,user) => id === party.id && user === memberId ? viewer : undefined);
   const command = vi.spyOn(service,"command").mockResolvedValue(null);
@@ -85,18 +85,65 @@ describe("Discord listening party controls", () => {
     await expect(runControl(app,interaction("seek",Infinity),memberId)).rejects.toThrow("between 0 and 31536000");
   });
   it("does not apply a search dropdown from a previous server/group binding", async () => {
-    const {app,command} = await setup();
+    const {app,viewer,command} = await setup();
+    command.mockResolvedValueOnce({ items: [
+      { id: "book-one", media: { metadata: { title: "One" } } },
+      { id: "book-two", media: { metadata: { title: "Two" } } }
+    ] });
+    const menu = dropdown(await runControl(app, search(), memberId));
+    command.mockClear();
     const selection = {id:"selection",application_id:applicationId,type:3,guild_id:guildId,
-      data:{custom_id:"audiobookshelf:select:old-party",values:["a".repeat(32)]}};
+      data:{custom_id:"audiobookshelf:select:old-party",values:[menu.options[0]!.value]}};
     await expect(runControl(app,selection,memberId)).rejects.toThrow("earlier listening party");
     expect(command).not.toHaveBeenCalled();
-    selection.data.custom_id = "audiobookshelf:select:current-party";
+    selection.data.custom_id = menu.custom_id;
     await runControl(app,selection,memberId);
-    expect(command).toHaveBeenCalledWith(expect.anything(),"select",{itemIds:["a".repeat(32)]});
+    expect(command).toHaveBeenCalledWith(viewer,"select",{items:[{itemId:"book-one"}]});
   });
   it("reports native playback state instead of extrapolating a second timeline", async () => {
     const {app,command} = await setup();
     command.mockResolvedValue({title:"Episode",positionSeconds:87.25,isPaused:false});
     expect((await runControl(app,interaction("now"),memberId)).content).toBe("Episode: playing at 87 seconds.");
+  });
+
+  const search = () => ({ ...interaction("play"), data: { name: "audiobookshelf", options: [{ name: "play", options: [{ name: "query", value: "Fixture" }] }] } });
+  const podcast = { id: "p".repeat(64), mediaType: "podcast", media: { metadata: { title: "Fixture podcast", author: "Podcast author" } } };
+  const episode = (id: string, title: string) => ({ ...podcast, recentEpisode: { id, title } });
+  const dropdown = (message: Awaited<ReturnType<typeof runControl>>) => (message.components as Array<{ components: Array<{
+    custom_id: string; options: Array<{ value: string; label: string; description: string }>
+  }> }>)[0]!.components[0]!;
+
+  it("plays a direct podcast episode match with both IDs", async () => {
+    const { app, viewer, command } = await setup();
+    command.mockResolvedValueOnce({ items: [episode("e".repeat(64), "Episode one")] });
+    expect((await runControl(app, search(), memberId)).content).toBe("Selected Fixture podcast — Episode one for everyone.");
+    expect(command).toHaveBeenLastCalledWith(viewer, "select", { items: [{ itemId: podcast.id, episodeId: "e".repeat(64) }] });
+  });
+
+  it("offers episodes for a show and keeps long IDs inside an account-scoped bounded selection", async () => {
+    const { app, viewer, command, member } = await setup();
+    command.mockResolvedValueOnce({ items: [podcast] });
+    command.mockResolvedValueOnce({ items: [episode("e".repeat(64), "Episode one"), episode("f".repeat(64), "Episode two")] });
+    const message = await runControl(app, search(), memberId);
+    expect(command).toHaveBeenNthCalledWith(2, viewer, "episodes", { itemIds: [podcast.id] });
+    expect(message.content).toContain("Choose an episode");
+    const menu = dropdown(message);
+    expect(menu.options[0]).toMatchObject({ label: "Episode one", description: "Fixture podcast" });
+    expect(menu.options[0]!.value).toMatch(/^[a-f0-9]{32}$/);
+    const select = { id: "selection", application_id: applicationId, type: 3, guild_id: guildId,
+      data: { custom_id: menu.custom_id, values: [menu.options[0]!.value] } };
+    member.mockReturnValueOnce({ ...viewer } as NativeViewer);
+    await expect(runControl(app, select, memberId)).rejects.toThrow("selection expired");
+    await runControl(app, select, memberId);
+    expect(command).toHaveBeenLastCalledWith(viewer, "select", { items: [{ itemId: podcast.id, episodeId: "e".repeat(64) }] });
+    const now = Date.now(); vi.spyOn(Date, "now").mockReturnValue(now + 300_001);
+    await expect(runControl(app, select, memberId)).rejects.toThrow("selection expired");
+  });
+
+  it("does not start a podcast without an available episode", async () => {
+    const { app, command } = await setup();
+    command.mockResolvedValueOnce({ items: [podcast] }).mockResolvedValueOnce({ items: [] });
+    expect((await runControl(app, search(), memberId)).content).toContain("no available episodes");
+    expect(command.mock.calls.some(([, action]) => action === "select")).toBe(false);
   });
 });

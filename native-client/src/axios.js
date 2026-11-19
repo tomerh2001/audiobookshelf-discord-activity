@@ -18,8 +18,9 @@ export default function ({ $axios, app }) {
     });
     $axios.onError(error => {
         if (error.activityStale) return Promise.reject(error);
-        if (error.response?.status === 401) app.$activity?.reconnect();
+        const status = Number.isInteger(error.response?.status) ? error.response.status : undefined;
+        if (status === 401) app.$activity?.reconnect();
         // Do not print upstream errors or capability-bearing request configs.
-        return Promise.reject(new Error(error.response?.status === 403 ? 'This account cannot access that item.' : 'Audiobookshelf could not complete this request.'));
+        return Promise.reject(Object.assign(new Error(status === 403 ? 'This account cannot access that item.' : 'Audiobookshelf could not complete this request.'), { status }));
     });
 }

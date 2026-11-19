@@ -11,11 +11,11 @@
       <button class="activity-fullscreen" @click="$activity.fullscreen()">Fullscreen</button>
     </div>
     <div v-if="$activity.state.error" class="activity-warning" role="alert">{{ $activity.state.error }} <button @click="$activity.retry()">Try again</button></div>
-    <div v-if="$activity.state.blocked" class="activity-unlock" role="dialog" aria-label="Join playback">
+    <div v-if="$activity.state.blocked" ref="unlock" class="activity-unlock" role="dialog" aria-modal="true" aria-label="Join playback" tabindex="-1">
       <p>Join playback</p><button @click="$activity.unlock()">Tap to play on this device</button>
     </div>
     <div v-if="$activity.state.rosterOpen" class="activity-dialog-backdrop" @click.self="$activity.state.rosterOpen = false">
-      <section class="activity-dialog" role="dialog" aria-modal="true" aria-label="Listening party">
+      <section ref="roster" class="activity-dialog" role="dialog" aria-modal="true" aria-label="Listening party" tabindex="-1">
         <h2>Listening party</h2>
         <p v-if="$activity.state.roster.loading">Loading participants…</p>
         <p v-if="$activity.state.roster.error" role="status">{{ $activity.state.roster.error }}</p>
@@ -28,7 +28,20 @@
   </div>
 </template>
 <script>
-export default { computed: { snapshot() { return this.$activity.state.snapshot; } } };
+import { createActivityDialogs } from '@/discordActivity/activityDialogs';
+export default {
+  computed: {
+    snapshot() { return this.$activity.state.snapshot; },
+    dialog() { return this.$activity.state.rosterOpen ? 'roster' : this.$activity.state.blocked ? 'unlock' : null; }
+  },
+  watch: { dialog() { this.$nextTick(() => this.dialogs?.update()); } },
+  mounted() {
+    this.dialogs = createActivityDialogs(window, () => this.dialog && ({ element: this.$refs[this.dialog], dismissible: this.dialog === 'roster' }), () => { this.$activity.state.rosterOpen = false; });
+    this.$activity.modalBack = () => this.dialogs.back();
+    this.dialogs.update();
+  },
+  beforeDestroy() { this.$activity.modalBack = undefined; this.dialogs?.dispose(); }
+};
 </script>
 <style>
 .page{height:calc(100% - 102px);max-height:calc(100% - 102px)}.page.streaming{height:calc(100% - 102px - 165px);max-height:calc(100% - 102px - 165px)}
@@ -37,5 +50,6 @@ export default { computed: { snapshot() { return this.$activity.state.snapshot; 
 .activity-fullscreen{margin-left:auto}.activity-controls{position:relative;z-index:70}.activity-dialog-backdrop{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:#000a;padding:20px;z-index:500}
 .activity-dialog{max-height:85vh;overflow:auto;width:360px;background:#202124;padding:24px;border-radius:12px;color:#eee}.activity-dialog h2{font-size:21px;margin-bottom:15px}.activity-dialog li{display:flex;align-items:center;gap:10px;margin:10px 0}.activity-dialog img{width:32px;height:32px;border-radius:50%}.activity-note{font-size:12px;color:#b6b8bc;margin:18px 0}
 .activity-warning{position:absolute;top:100%;left:0;right:0;padding:8px 15px;background:#5b3b1a;color:#fff}.activity-unlock{position:fixed;inset:auto 10% 30%;z-index:400;text-align:center;padding:20px;background:#202124f5;color:#fff;border:1px solid #fff5;border-radius:12px}.activity-unlock p{margin-bottom:12px}
+.activity-queue-actions{display:flex;flex-wrap:wrap;gap:4px;justify-content:flex-end;max-width:240px}.activity-queue-actions button{padding:4px 8px;border:1px solid #ffffff40;border-radius:4px;font-size:12px}.activity-queue-actions button:disabled{opacity:.35}.activity-queue-actions button:focus-visible{outline:2px solid white;outline-offset:2px}
 .activity-preview #appbar,.activity-preview .activity-toolbar,.activity-preview #app-content,.activity-preview .has-siderail{display:none!important}.activity-preview #mediaPlayerContainer{bottom:0!important}
 </style>

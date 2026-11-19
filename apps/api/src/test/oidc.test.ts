@@ -19,8 +19,9 @@ describe("native Audiobookshelf Authentik / OIDC handoff", () => {
     const f = await fixture({ AUDIOBOOKSHELF_PUBLIC_SERVER_URL: "https://books.example/abs" });
     const alice = await actor(f.env);
     const started = await f.app.inject({ method: "POST", url: "/api/connections/oidc", headers: alice.headers,
-      payload: { serverUrl: "https://books.example/abs" } });
+      payload: {} });
     expect(started.statusCode).toBe(201);
+    expect(started.body).not.toContain("books.example");
     const pending = started.json<{ id: string; url: string; expiresAt: string }>();
     expect(pending.url).toMatch(/^https:\/\/listen.example\/api\/connections\/oidc\/start\//);
     expect(started.body).not.toMatch(/verifier|connect.sid|upstream-secret|refreshToken/);
@@ -60,7 +61,7 @@ describe("native Audiobookshelf Authentik / OIDC handoff", () => {
     const f = await fixture();
     const alice = await actor(f.env);
     const other = await actor(f.env);
-    const pending = (await f.app.inject({ method: "POST", url: "/api/connections/oidc", headers: alice.headers, payload: { serverUrl: f.url } })).json<{ id: string; url: string }>();
+    const pending = (await f.app.inject({ method: "POST", url: "/api/connections/oidc", headers: alice.headers, payload: {} })).json<{ id: string; url: string }>();
     expect((await f.app.inject({ method: "POST", url: `/api/connections/oidc/${pending.id}/poll`, headers: other.headers })).statusCode).toBe(404);
     const forged = new URL(pending.url); forged.searchParams.set("ticket", "wrong-ticket");
     expect((await f.app.inject({ url: localUrl(forged.toString()) })).statusCode).toBe(400);
@@ -75,7 +76,7 @@ describe("native Audiobookshelf Authentik / OIDC handoff", () => {
       const f = await fixture();
       f.state.redirectMode = mode;
       const alice = await actor(f.env);
-      const pending = (await f.app.inject({ method: "POST", url: "/api/connections/oidc", headers: alice.headers, payload: { serverUrl: f.url } })).json<{ id: string; url: string }>();
+      const pending = (await f.app.inject({ method: "POST", url: "/api/connections/oidc", headers: alice.headers, payload: {} })).json<{ id: string; url: string }>();
       const begin = await f.app.inject({ url: localUrl(pending.url) });
       expect(begin.statusCode).toBe(400);
       expect(begin.headers.location).toBeUndefined();
@@ -88,7 +89,7 @@ describe("native Audiobookshelf Authentik / OIDC handoff", () => {
   it("does not save an in-flight login after the Discord session is revoked", async () => {
     const f = await fixture();
     const alice = await actor(f.env);
-    const pending = (await f.app.inject({ method: "POST", url: "/api/connections/oidc", headers: alice.headers, payload: { serverUrl: f.url } })).json<{ url: string }>();
+    const pending = (await f.app.inject({ method: "POST", url: "/api/connections/oidc", headers: alice.headers, payload: {} })).json<{ url: string }>();
     const begin = await f.app.inject({ url: localUrl(pending.url) });
     f.state.beforeExchange = () => sessionStore.deleteSession(alice.session.id);
     const complete = await f.app.inject({ url: `/api/connections/oidc/callback?state=${encodeURIComponent(f.state.oauthState)}&code=private-code`,
@@ -102,10 +103,10 @@ describe("native Audiobookshelf Authentik / OIDC handoff", () => {
     const f = await fixture();
     const alice = await actor(f.env);
     f.state.authMethods = ["local"];
-    const result = await f.app.inject({ method: "POST", url: "/api/connections/oidc", headers: alice.headers, payload: { serverUrl: f.url } });
+    const result = await f.app.inject({ method: "POST", url: "/api/connections/oidc", headers: alice.headers, payload: {} });
     expect(result.statusCode).toBe(409);
     f.env.AUDIOBOOKSHELF_OIDC_ENABLED = false;
-    const disabled = await f.app.inject({ method: "POST", url: "/api/connections/oidc", headers: alice.headers, payload: { serverUrl: f.url } });
+    const disabled = await f.app.inject({ method: "POST", url: "/api/connections/oidc", headers: alice.headers, payload: {} });
     expect(disabled.statusCode).toBe(403);
     expect(f.requests).toHaveLength(1);
   });

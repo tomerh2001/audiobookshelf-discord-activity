@@ -45,7 +45,7 @@ describe("saved Audiobookshelf connections", () => {
     const user = await actor(f.env);
     f.state.publicInfo = { unexpected: "not Audiobookshelf" };
     const invalid = await f.app.inject({ method: "POST", url: "/api/connections", headers: user.headers,
-      payload: { serverUrl: f.url, username: "demo", password: "private-password" } });
+      payload: { username: "demo", password: "private-password" } });
     expect(invalid.statusCode).toBe(502);
     expect(f.requests.map((request) => request.path)).toEqual(["/status"]);
     expect(f.requests[0]?.headers.authorization).toBeUndefined();
@@ -53,7 +53,7 @@ describe("saved Audiobookshelf connections", () => {
     f.state.publicInfo = { app: "audiobookshelf", isInit: true, serverVersion: "2.38.0", authMethods: ["local", "openid"] };
     f.state.authStatus = 401;
     const rejected = await f.app.inject({ method: "POST", url: "/api/connections", headers: user.headers,
-      payload: { serverUrl: f.url, username: "demo", password: "private-password" } });
+      payload: { username: "demo", password: "private-password" } });
     expect(rejected.statusCode).toBe(401);
     expect(rejected.body).not.toContain("upstream-debug-private-password");
     expect(new AudiobookshelfConnectionStore(f.env).list(user.session.discordUserId)).toEqual([]);
@@ -63,10 +63,11 @@ describe("saved Audiobookshelf connections", () => {
     const f = await fixture();
     const user = await actor(f.env, "alice", "guild-one");
     const result = await f.app.inject({ method: "POST", url: "/api/connections", headers: user.headers,
-      payload: { serverUrl: `${f.url}/`, username: " demo ", password: "  fixture password  " } });
+      payload: { username: " demo ", password: "  fixture password  " } });
     expect(result.statusCode).toBe(201);
+    expect(result.body).not.toMatch(/serverUrl|serverName/);
     const connection = result.json<{ connection: ConnectionDto }>().connection;
-    expect(connection).toMatchObject({ serverUrl: f.url, audiobookshelfUsername: "demo", kind: "personal" });
+    expect(connection).toMatchObject({ audiobookshelfUsername: "demo", kind: "personal" });
     const login = f.requests.find((request) => request.path === "/login")!;
     expect(login.body).toEqual({ username: "demo", password: "  fixture password  " });
     expect(login.headers.authorization).toBeUndefined();
@@ -82,31 +83,60 @@ describe("saved Audiobookshelf connections", () => {
     sessionStore.deleteSession(user.session.id);
     const reopened = await actor(f.env, "alice", "guild-one");
     const list = await f.app.inject({ method: "GET", url: "/api/connections", headers: reopened.headers });
-    expect(list.json()).toMatchObject({ connections: [connection], preferredConnectionId: connection.id, defaultServerUrl: f.url });
+    expect(list.json()).toMatchObject({ connections: [connection], preferredConnectionId: connection.id, passwordEnabled: true, oidcEnabled: true });
     expect((await resolveConnection(f.env, "alice", connection.id)).accessToken).toBe("fixture-access-token-1");
     expect(f.state.authCount).toBe(1);
   });
 
-  it("accepts the public alias while keeping saved account and preference identity canonical", async () => {
+  it("uses server configuration without returning either private or public upstream addresses", async () => {
     // .invalid cannot be contacted: every successful request must use the
     // approved loopback fixture, without ever sending credentials to the alias.
     const publicUrl = "https://media.invalid/audiobookshelf";
     const f = await fixture({ AUDIOBOOKSHELF_PUBLIC_SERVER_URL: publicUrl, AUDIOBOOKSHELF_ALLOW_CUSTOM_SERVERS: "false" });
     const alice = await actor(f.env, "alice", "guild-one");
     const before = await f.app.inject({ method: "GET", url: "/api/connections", headers: alice.headers });
-    expect(before.json()).toMatchObject({ connections: [], defaultServerUrl: publicUrl, canonicalDefaultServerUrl: f.url });
-    expect(f.requests).toHaveLength(0);
+    expect(before.json()).toMatchObject({ connections: [], passwordEnabled: true, oidcEnabled: true });
+    expect(f.requests.map(request => request.path)).toEqual(["/status"]);
+    expect(before.body).not.toContain(f.url);
+    expect(before.body).not.toContain(publicUrl);
     const original = await connectWithPassword(f.env, alice.session, { serverUrl: f.url, username: "alice", password: "fixture" });
     const result = await f.app.inject({ method: "POST", url: "/api/connections", headers: alice.headers,
-      payload: { serverUrl: `${publicUrl}/`, username: "alice", password: "fixture" } });
+      payload: { username: "alice", password: "fixture" } });
     expect(result.statusCode).toBe(201);
-    expect(result.json()).toMatchObject({ connection: { id: original.id, serverUrl: f.url } });
+    expect(result.json()).toMatchObject({ connection: { id: original.id } });
     const store = new AudiobookshelfConnectionStore(f.env);
     expect(store.list("alice", "guild-one")).toHaveLength(1);
     expect(store.preferred("alice", "guild-one")).toBe(original.id);
     expect((await resolveConnection(f.env, "alice", original.id, "guild-one")).target.serverUrl).toBe(f.url);
     expect(f.state.logoutCount).toBe(1);
     expect(f.requests.every((request) => request.headers.host === new URL(f.url).host)).toBe(true);
+  });
+
+  it("rejects client-selected upstreams for password and OIDC login before making upstream requests", async () => {
+    const f = await fixture({ AUDIOBOOKSHELF_ALLOW_CUSTOM_SERVERS: "true" });
+    const user = await actor(f.env);
+    for (const serverUrl of [f.url, "https://untrusted.invalid", "http://169.254.169.254"]) {
+      for (const [url, payload] of [
+        ["/api/connections", { serverUrl, username: "alice", password: "private-password" }],
+        ["/api/connections/oidc", { serverUrl }]
+      ] as const) {
+        const result = await f.app.inject({ method: "POST", url, headers: user.headers, payload });
+        expect(result.statusCode).toBe(400);
+        expect(result.body).not.toContain(serverUrl);
+      }
+    }
+    expect(f.requests).toHaveLength(0);
+  });
+
+  it("shows only sign-in methods enabled on the configured library", async () => {
+    const f = await fixture();
+    const user = await actor(f.env);
+    f.state.publicInfo = { app: "audiobookshelf", isInit: true, serverVersion: "2.38.0", authMethods: ["openid"] };
+    const result = await f.app.inject({ url: "/api/connections", headers: user.headers });
+    expect(result.json()).toMatchObject({ passwordEnabled: false, oidcEnabled: true });
+    expect(result.body).not.toMatch(/serverUrl|serverName|defaultServer/);
+    f.env.AUDIOBOOKSHELF_OIDC_ENABLED = false;
+    expect((await f.app.inject({ url: "/api/connections", headers: user.headers })).json()).toMatchObject({ passwordEnabled: false, oidcEnabled: false });
   });
 
   it("isolates ownership and guild preferences, and clears preferences and capabilities on disconnect", async () => {

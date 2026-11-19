@@ -3,7 +3,7 @@ import type { ActivityDiscordContext } from "./sdk.js";
 
 /** Deliberately excludes Audiobookshelf server addresses, identifiers and credentials. */
 export type WatchSnapshot = {
-  kind: "episode" | "movie" | "audio" | "video";
+  kind: "episode" | "movie" | "audio" | "podcast" | "video";
   title: string;
   seriesName?: string;
   seasonNumber?: number;
@@ -52,9 +52,10 @@ function safeMs(value: number): number {
 }
 
 export function formatWatchActivity(snapshot: WatchSnapshot, now: number, iconUrl?: string): Activity {
-  const title = clipped(snapshot.title) || (snapshot.kind === "audio" ? "Audio" : "Video");
+  const listening = snapshot.kind === "audio" || snapshot.kind === "podcast";
+  const title = clipped(snapshot.title) || (listening ? "Audiobook" : "Video");
   let details = title;
-  if (snapshot.kind === "episode") {
+  if (snapshot.kind === "episode" || snapshot.kind === "podcast") {
     const season = numbered(snapshot.seasonNumber) ? ` · Season ${snapshot.seasonNumber}` : "";
     const episode = numbered(snapshot.episodeNumber)
       ? ` · Episode ${snapshot.episodeNumber}${numbered(snapshot.episodeEndNumber) && snapshot.episodeEndNumber > snapshot.episodeNumber ? `–${snapshot.episodeEndNumber}` : ""}` : "";
@@ -69,12 +70,12 @@ export function formatWatchActivity(snapshot: WatchSnapshot, now: number, iconUr
   const status = snapshot.buffering ? "Buffering" : snapshot.paused ? "Paused" : "Playing";
   const progress = snapshot.paused || snapshot.buffering ? ` · ${time(position)}${duration ? ` / ${time(duration)}` : ""}` : "";
   const stateSuffix = `${status}${progress}`;
-  const state = snapshot.kind === "episode" && snapshot.seriesName && title !== clipped(snapshot.seriesName)
+  const state = (snapshot.kind === "episode" || snapshot.kind === "podcast") && snapshot.seriesName && title !== clipped(snapshot.seriesName)
     ? `${clipped(title, 128 - stateSuffix.length - 3)} · ${stateSuffix}` : stateSuffix;
   const rate = Number.isFinite(snapshot.playbackRate) && snapshot.playbackRate > 0 ? snapshot.playbackRate : 1;
-  const displayDetails = details.length < 2 ? `${details} · ${snapshot.kind === "audio" ? "Audio" : "Video"}` : details;
+  const displayDetails = details.length < 2 ? `${details} · ${listening ? "Audiobook" : "Video"}` : details;
   return {
-    type: snapshot.kind === "audio" ? 2 : 3,
+    type: listening ? 2 : 3,
     details: displayDetails,
     state,
     timestamps: snapshot.paused || snapshot.buffering ? null : {

@@ -36,9 +36,9 @@ export const envSchema = z.object({
   TOKEN_ENCRYPTION_KEY: z.string().default(""),
   DATABASE_URL: z.string().default("file:/data/app.db"),
   AUDIOBOOKSHELF_DEFAULT_SERVER_URL: z.string().url().default("http://localhost:13378"),
-  // An exact user-facing alias for the approved default, never another upstream.
+  // Public origin used only for the native identity-provider redirect; never a user-selected server.
   AUDIOBOOKSHELF_PUBLIC_SERVER_URL: z.union([z.literal(""), z.url({ protocol: /^https$/ })]).default(""),
-  AUDIOBOOKSHELF_ALLOW_CUSTOM_SERVERS: booleanFromString.default(true),
+  AUDIOBOOKSHELF_ALLOW_CUSTOM_SERVERS: booleanFromString.default(false),
   AUDIOBOOKSHELF_AUTH_MODE: z.enum(["per-user", "shared"]).default("per-user"),
   AUDIOBOOKSHELF_COMMUNITY_ACCESS: z.enum(["guilds", "public"]).default("guilds"),
   AUDIOBOOKSHELF_COMMUNITY_GUILD_IDS: z.string().default(""),

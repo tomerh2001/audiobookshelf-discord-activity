@@ -298,8 +298,10 @@ export async function prepareNativeSocket(viewer: NativeViewer, signal?: AbortSi
 export function bridgeNativeSocket(service: NativePartyService, viewer: NativeViewer, socket: WebSocket, prepared: PreparedNativeSocket): void {
   viewer.sockets++; viewer.lastSocketClose = 0;
   let ended = false; let alive = true; let pending = 0; let unsubscribe: (() => void) | undefined;
+  const changedItems = new Set<string>();
+  let libraryChanged = false; let refreshing = false; let refreshTimer: ReturnType<typeof setTimeout> | undefined;
   const stop = () => {
-    if (ended) return; ended = true; clearInterval(heartbeat); unsubscribe?.(); viewer.aborters.delete(stop);
+    if (ended) return; ended = true; clearInterval(heartbeat); clearTimeout(refreshTimer); changedItems.clear(); unsubscribe?.(); viewer.aborters.delete(stop);
     prepared.socket.disconnect(); socket.terminate(); void service.socketDisconnected(viewer);
   };
   viewer.aborters.add(stop);
@@ -307,6 +309,43 @@ export function bridgeNativeSocket(service: NativePartyService, viewer: NativeVi
     if (ended || !service.active(viewer) || socket.readyState !== WebSocket.OPEN) return;
     if (socket.bufferedAmount > MAX_SOCKET_BUFFER) { stop(); return; }
     socket.send(JSON.stringify({ MessageType, Data }));
+  };
+  const scheduleRefresh = () => {
+    if (ended || refreshing || refreshTimer) return;
+    refreshTimer = setTimeout(() => {
+      refreshTimer = undefined; refreshing = true;
+      const ids = [...changedItems]; changedItems.clear();
+      let invalidateLibrary = libraryChanged; libraryChanged = false;
+      void (async () => {
+        await service.authorize(viewer.capability);
+        const permitted: string[] = [];
+        let cursor = 0;
+        // Fresh per-viewer reads deliberately bypass the 30-second access cache.
+        // Socket item objects never cross the gateway, even for admin accounts.
+        await Promise.all(Array.from({ length: Math.min(4, ids.length) }, async () => {
+          while (cursor < ids.length && !ended && service.active(viewer)) {
+            const id = ids[cursor++]!;
+            viewer.itemAccess.delete(id);
+            try {
+              const item = await service.json(viewer, "GET", `/api/items/${id}`);
+              if (record(item).id === id) permitted.push(id);
+              else invalidateLibrary = true;
+            } catch { invalidateLibrary = true; }
+          }
+        }));
+        if (permitted.length) send("AudiobookshelfEvent", { event: "items_changed", payload: { itemIds: permitted } });
+        if (invalidateLibrary) {
+          // Deleted or newly restricted objects cannot be re-read. Send only a
+          // content-free invalidation; the client reloads its authorized routes.
+          const libraries = await service.json(viewer, "GET", "/api/libraries");
+          if (Array.isArray(record(libraries).libraries)) send("AudiobookshelfEvent", { event: "library_changed", payload: {} });
+        }
+      })().catch(() => undefined).finally(() => {
+        refreshing = false;
+        if (changedItems.size || libraryChanged) scheduleRefresh();
+      });
+    }, 50);
+    refreshTimer.unref();
   };
   const heartbeat = setInterval(() => {
     if (!alive || !service.active(viewer)) { stop(); return; } alive = false; socket.ping();
@@ -316,6 +355,27 @@ export function bridgeNativeSocket(service: NativePartyService, viewer: NativeVi
   socket.on("close", stop); socket.on("error", stop);
   prepared.socket.on("disconnect", stop);
   prepared.socket.onAny((event: string, payload: unknown) => {
+    if (["item_added", "item_updated", "items_added", "items_updated"].includes(event)) {
+      const items = Array.isArray(payload) ? payload : [payload];
+      if (items.length > 100) libraryChanged = true;
+      for (const item of items.slice(0, 100)) {
+        const id = record(item).id;
+        if (typeof id !== "string" || !matches(id, ID)) continue;
+        if (changedItems.size < 100) changedItems.add(id); else libraryChanged = true;
+      }
+      if (changedItems.size || libraryChanged) scheduleRefresh();
+      return;
+    }
+    if (["library_added", "library_updated", "library_removed", "item_removed", "items_removed",
+      "author_added", "author_updated", "author_removed", "collection_added", "collection_updated", "collection_removed", "series_removed"].includes(event)) {
+      // No removed IDs or library metadata are disclosed: ABS broadcasts some
+      // library removals to all accounts, including users without that library.
+      if (event.startsWith("item")) for (const item of (Array.isArray(payload) ? payload : [payload]).slice(0, 100)) {
+        const id = record(item).id;
+        if (typeof id === "string") { viewer.itemAccess.delete(id); changedItems.delete(id); }
+      }
+      libraryChanged = true; scheduleRefresh(); return;
+    }
     if (event === "user_updated" && record(payload).id === viewer.connection.audiobookshelfUserId) {
       send("AudiobookshelfEvent", { event, payload: sanitizeNativeJson(viewer, payload) }); return;
     }

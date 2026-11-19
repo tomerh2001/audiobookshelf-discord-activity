@@ -2,6 +2,16 @@
 
 The Audiobookshelf adaptation is implemented in a separate checkout based on Jellyfin Watch `c8a0511`. The original Jellyfin checkout was unchanged. This report separates automated checks, simulated browser checks and limited live-service verification. It does not establish an end-to-end Discord or Authentik login.
 
+## Listening experience follow-up
+
+The November 19 follow-up removes server entry from login and all server addresses from connection/party responses. The deployment selects the library and its enabled login methods. It also adds queue ordering, Play next, shuffle, Clear upcoming, account switching without forgetting credentials, accessible dialogs, authorized live library refresh, podcast command choices, and custom Activity artwork.
+
+Rich Presence now recovers when its observer attaches after the native audio element has already begun playing, updates immediately on playback/buffering events, and distinguishes podcast shows and episode titles. The presence tests verify actual-media-state gating, paused/buffering state, and safe title payloads. They do not prove that Discord rendered a status on a real user's profile.
+
+The follow-up passes 368 workspace tests (29 shared, 59 frontend, 280 API) and all 85 native integration tests, with production builds, TypeScript and lint passing. The native suite includes a regression ensuring that an observer which first sees stalled media waits for enough buffered data or a real playing event before publishing playback. The original checks below describe the earlier release.
+
+The rebuilt interface also passed a headed-browser check using synthetic community login and generated audio. The login showed the custom brand and enabled sign-in choices without a server field. Real native playback produced `The Listening Room / Playing` through the compiled Rich Presence formatter into a synthetic SDK receiver. Pause changed the receiver to `A Second Chapter / Paused · 0:06 / 2:00`. Play next added an item and the queue exposed its new controls. The participant dialog focused Close, contained Tab and returned focus to its opener after Escape. No fixture error message appeared during these checks. The receiver makes no Discord call, so it proves the native playback-to-status path rather than Discord's profile rendering.
+
 ## Automated checks
 
 | Check | Result |

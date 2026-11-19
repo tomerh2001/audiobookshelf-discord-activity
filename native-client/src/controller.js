@@ -6,7 +6,7 @@ export function preferredAccount(data, party, matches) {
 
 export function sameParty(left, right) {
     return left?.id === right?.id && left?.groupId === right?.groupId
-        && left?.serverId === right?.serverId && left?.serverUrl === right?.serverUrl;
+        && left?.serverId === right?.serverId;
 }
 
 export function createActivityController(broker, installLaunch, deviceId) {
@@ -105,7 +105,7 @@ export function createActivityController(broker, installLaunch, deviceId) {
                 let current = await call('getParty');
                 if (!currentSelection()) return;
                 if (current && !replaceParty && !broker.matchesPartyServer(connection, current)) {
-                    throw new Error('This party is using another Audiobookshelf server. Connect an account on that server to join.');
+                    throw new Error('The library configuration changed. Sign in again to join this listening party.');
                 }
                 if (!current || replaceParty) current = await call('joinParty', connection.id);
                 if (!currentSelection()) return;

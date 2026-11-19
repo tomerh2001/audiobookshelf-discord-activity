@@ -50,11 +50,12 @@ module.exports.buildModules = []
 module.exports.modules = ['@nuxtjs/axios']
 module.exports.head.title = 'Audiobookshelf Listen'
 module.exports.head.script = [{ src: '/activity-storage.js' }, { src: '/activity-session.js' }]
-module.exports.head.link = [{ rel: 'icon', href: '/icon.svg' }]
+module.exports.head.link = [{ rel: 'icon', href: '/branding/audiobookshelf-listen-icon.png' }]
 module.exports.pwa = undefined
 module.exports.generate = { fallback: 'index.html', crawler: false, routes: [] }
 module.exports.build = { terser: { terserOptions: { compress: { drop_console: true } } } }
 `);
+await cp(path.join(root, 'branding'), path.join(source, 'client/static/branding'), { recursive: true });
 await cp(path.join(root, 'src/storage.js'), path.join(source, 'client/static/activity-storage.js'));
 if (!process.argv.includes('--prepare-only')) {
     const client = path.join(source, 'client');

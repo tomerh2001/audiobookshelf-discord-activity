@@ -169,6 +169,12 @@ function fromRow(row: Record<string, unknown>): ConnectionRecord {
     communityGuildId: String(row.community_guild_id), encryptedRefreshToken: String(row.encrypted_refresh_token) };
 }
 
+/** Browser account metadata deliberately excludes upstream addresses and host-derived names. */
+export function clientConnection(connection: ConnectionDto) {
+  const { serverUrl: _url, serverName: _name, ...client } = connection;
+  return client;
+}
+
 function publicConnection(record: ConnectionRecord): ConnectionDto {
   const { discordUserId: _owner, encryptedAccessToken: _token, encryptedRefreshToken: _refresh, loginDeviceId: _device, communityGuildId: _guild, ...dto } = record;
   return dto;
@@ -336,6 +342,9 @@ export async function resolveConnection(env: AppEnv, discordUserId: string, conn
 
 async function resolveCredential(env: AppEnv, initial: ConnectionRecord, guildId?: string): Promise<ResolvedConnection> {
   let record = initial;
+  if (record.serverUrl !== normalizeUpstreamUrl(env.AUDIOBOOKSHELF_DEFAULT_SERVER_URL)) {
+    throw new ConnectionError("audiobookshelf_server_changed", "The library configuration changed. Sign in again.", 409);
+  }
   const target = await validateUpstream(env, record.serverUrl);
   await identifyServer(target);
   let token = decryptString(env, record.encryptedAccessToken);
