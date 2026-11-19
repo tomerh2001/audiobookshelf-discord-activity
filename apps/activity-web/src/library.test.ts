@@ -27,7 +27,7 @@ it("loads a passive facade outside Discord and overlaps one Activity handshake w
       window.eval(chunk.code);
       const facade = window.AudiobookshelfWatch;
       expect(Object.keys(facade).sort()).toEqual([
-        "StartupTimeout", "clearActivitySession", "closeDiscordActivity", "connectAccount", "connectCommunity", "createWatchPresence", "deleteConnection",
+        "StartupTimeout", "clearActivitySession", "closeDiscordActivity", "connectAccount", "connectCommunity", "createPresenceDiagnostics", "createWatchPresence", "deleteConnection",
         "getConnectedParticipants", "getConnections", "getParty", "joinParty", "launchNative", "logout", "matchesPartyServer", "normalizeNativeRoute",
         "observeActivityParticipants", "observeActivityPresentation", "onSessionRejected", "pollOidcLogin", "resumeActivitySession", "saveNativeRestore", "savePreference", "startActivitySession", "startOidcLogin"
       ]);

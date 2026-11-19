@@ -5,7 +5,7 @@ const seconds = ticks => Math.max(0, ticks / TICKS);
 const identity = entry => entry ? `${entry.id}:${entry.itemId}:${entry.episodeId || ''}` : '';
 
 /** Adapt the actual Audiobookshelf PlayerHandler and whole-book track timeline. */
-export function createNativePlayer({ component: ctx, socket, baseUrl, presence, onSnapshot = () => {}, onBlocked = () => {}, onError = () => {}, now = () => Date.now() }) {
+export function createNativePlayer({ component: ctx, socket, baseUrl, presence, onSnapshot = () => {}, onBlocked = () => {}, onError = () => {}, onDiagnostic = () => {}, now = () => Date.now() }) {
     const handler = ctx.playerHandler, store = ctx.$store;
     let closed = false, generation = 0, loadingIdentity = '', selectedIdentity = '', snapshot, suppressQueue = false;
     let pendingEffect, driftSeekAt = 0, stableSince = 0, sleeping = false, blocked = false, audio, played = false, buffering = false;
@@ -16,6 +16,11 @@ export function createNativePlayer({ component: ctx, socket, baseUrl, presence, 
     const submit = (value, options) => { const promise = engine.submit(value, options); void promise.catch(() => {}); return promise; };
     function setBlocked(value) { blocked = value; onBlocked(value); }
     function currentAudio() { return handler.player?.player; }
+    function diagnose(reason) {
+        try { onDiagnostic({ event: 'observer', reason, ...(audio ? { audioReadyState: audio.readyState } : {}),
+            playing: Boolean(audio && !audio.paused && !audio.ended && audio.readyState >= 3),
+            titlePresent: Boolean(handler.displayTitle || handler.libraryItem?.media?.metadata?.title) }); } catch { /* Optional diagnostics never affect the player. */ }
+    }
     async function loadItem(id) {
         if (itemCache.has(id)) return itemCache.get(id);
         if (!itemPending.has(id)) {
@@ -153,10 +158,10 @@ export function createNativePlayer({ component: ctx, socket, baseUrl, presence, 
         if (closed) return;
         observeAudio();
         const value = engine.getSnapshot();
-        if (!value) return;
+        if (!value) { diagnose('no_snapshot'); return; }
         snapshot = value; onSnapshot(value);
         const entry = value.queue[value.index];
-        if (!entry || loadingIdentity || selectedIdentity !== identity(entry)) return;
+        if (!entry || loadingIdentity || selectedIdentity !== identity(entry)) { diagnose(!entry ? 'no_entry' : loadingIdentity ? 'loading' : 'identity_mismatch'); return; }
         if (pendingEffect && audio?.readyState >= 1 && handler.playerState !== 'LOADING') { const effect = pendingEffect; pendingEffect = undefined; synchronize(value, effect); }
         const rate = value.playbackRate || 1;
         const actual = handler.getCurrentTime(), target = seconds(value.positionTicks), drift = target - actual;
@@ -171,13 +176,14 @@ export function createNativePlayer({ component: ctx, socket, baseUrl, presence, 
             else handler.setPlaybackRate(buffered && Math.abs(drift) > 0.25 ? rate * (drift > 0 ? 1.03 : 0.97) : rate);
         }
         if (played && audio && !audio.ended && handler.libraryItem) {
+            diagnose('ready');
             const episode = entry.episodeId && handler.libraryItem.media?.episodes?.find(value => value.id === entry.episodeId);
             presence?.update({ kind: episode ? 'podcast' : 'audio',
                 title: episode?.title || handler.displayTitle || handler.libraryItem.media?.metadata?.title || 'Audiobook',
                 ...(episode ? { seriesName: handler.libraryItem.media?.metadata?.title } : {}),
                 positionMs: actual * 1000, durationMs: handler.getDuration() * 1000, paused: audio.paused, buffering,
                 playbackRate: rate });
-        } else presence?.clear();
+        } else { diagnose(!played || !audio ? 'not_started' : audio.ended ? 'ended' : 'no_item'); presence?.clear(); }
     }
     const timer = setInterval(tick, 1000);
     document.addEventListener('audiobookshelf-activity-playback-blocked', onBlockedEvent, true);

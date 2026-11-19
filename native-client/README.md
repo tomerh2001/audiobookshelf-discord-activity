@@ -32,7 +32,11 @@ The existing native player negotiates direct audio or HLS and reports listening 
 
 The lockfile-pinned HLS dependency supplies its unchanged standalone worker at `/hls.worker.js`, with its Apache license and source map. `workerPath` selects that same-origin asset. It avoids both a webpack-rewritten stringified worker and a dependency on allowing blob workers in the iframe's security policy.
 
-The listening-party panel shows the Discord roster and live membership changes. Rich Presence uses actual local audio playback and public Discord application artwork. Protected media addresses, gateway credentials and server identities are excluded. Discord focused, PiP and grid changes preserve the session and player. Fullscreen follows browser permissions.
+The native app bar retains Back navigation and a group button that opens the listening-party panel and Discord roster. That dialog offers fullscreen when the browser permits it; otherwise it points to Discord's fullscreen control. Previous/next queue entries and shared repeat mode are in the native queue dialog. There is no additional controls row above the library.
+
+The native layout gives browsing its own scrolling area above the player, using the actual desktop/mobile player height. Popout resizing and first-render PiP/grid state use the same responsive layout. Compact mode retains the title, native playback controls and progress while hiding library chrome; short views can scroll the player. Layout changes preserve the same session and audio element.
+
+Rich Presence uses actual local audio playback and public Discord application artwork. Protected media addresses, gateway credentials and server identities are excluded.
 
 ## Verification
 

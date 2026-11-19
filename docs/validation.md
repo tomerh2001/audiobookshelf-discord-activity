@@ -4,6 +4,16 @@ The Audiobookshelf adaptation is implemented in a separate checkout based on Jel
 
 ## Listening experience follow-up
 
+### Compact views and interrupted sessions
+
+The follow-up removes the extra controls row, puts the party button and Back in the native app bar, and places previous/next/repeat in the native queue dialog. Browsing and dialogs have bounded scroll areas, and the compact player uses the initial presentation state. Queue navigation is disabled when no neighboring item exists; fullscreen is offered only when the document supports it.
+
+The final compiled native interface passed a headed-browser fixture check at 1100×600, 390×640, 800×450 and 320×180. Library content scrolls to its bottom above the player, the narrow app bar preserves the account button, and the compact view retains the title and playback controls. The queue stays inside the short viewport and scrolls to its last entry. Next and Previous switch between distinct book titles, Repeat All survives closing and reopening the queue, and the party dialog offers fullscreen in a supporting browser. Discord identity, media and the SDK receiver were synthetic; outer Discord popout borders and a real profile card remain unverified.
+
+Account recovery now stops an expired native player before one replacement attempt. A verified Discord session renewal can reconnect the selected account after the backend loses its in-memory party. Failed recovery requires an explicit retry, late requests from an old account cannot reconnect a newer account, and temporary polling failures preserve valid playback. A reproduction using the pinned native PlayerHandler reduced repeated failed progress saves from six requests and a warning to one failed request followed by a stopped timer. This does not preserve the queue across a backend restart.
+
+The follow-up passes 409 workspace tests (29 shared, 68 frontend, 312 API) and 97 native tests. The presence tests now also exercise the installed Discord SDK's message transport, including valid acknowledgements, a missing returned title, numeric rejection and an empty response that times out. Content-free, authenticated diagnostics distinguish player observation from status requests and responses. These checks do not establish that a real Discord profile displays the title; that remains a separate live verification.
+
 The November 19 follow-up removes server entry from login and all server addresses from connection/party responses. The deployment selects the library and its enabled login methods. It also adds queue ordering, Play next, shuffle, Clear upcoming, account switching without forgetting credentials, accessible dialogs, authorized live library refresh, podcast command choices, and custom Activity artwork.
 
 Rich Presence now recovers when its observer attaches after the native audio element has already begun playing, updates immediately on playback/buffering events, and distinguishes podcast shows and episode titles. The presence tests verify actual-media-state gating, paused/buffering state, and safe title payloads. They do not prove that Discord rendered a status on a real user's profile.

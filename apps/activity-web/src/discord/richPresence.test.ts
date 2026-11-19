@@ -9,7 +9,7 @@ const episode: WatchSnapshot = {
   paused: false, buffering: false, playbackRate: 1
 };
 function fixture(scopes = ["identify", "rpc.activities.write"]) {
-  const setActivity = vi.fn().mockResolvedValue({});
+  const setActivity = vi.fn().mockImplementation(async ({ activity }) => ({ name: "Fixture Activity", type: 0, ...activity }));
   const context = { instanceId: "instance", isMock: false, grantedScopes: scopes,
     application: { id: "1234567890", icon: "a".repeat(32) },
     sdk: { commands: { setActivity } }
@@ -160,4 +160,39 @@ it("publishes audiobooks and podcast episodes as listening with their actual tit
   delete podcast.seasonNumber; delete podcast.episodeNumber;
   expect(formatWatchActivity(podcast, epoch)).toMatchObject({ type: 2, details: "Stories at Night", state: "The Long Journey · Playing" });
   expect(formatWatchActivity({ ...podcast, paused: true }, epoch)).toMatchObject({ type: 2, state: "The Long Journey · Paused · 7:53 / 23:00", timestamps: null });
+});
+
+it("reports disabled scope, accepted RPC and rejected RPC without recording the title or error text", async () => {
+  const diagnostics = vi.fn();
+  const missing = fixture(["identify"]);
+  createWatchPresence(missing.context, diagnostics).update(episode);
+  expect(diagnostics).toHaveBeenCalledExactlyOnceWith({ event: "disabled", reason: "missing_scope" });
+  diagnostics.mockClear();
+  const { context, setActivity } = fixture();
+  const publisher = createWatchPresence(context, diagnostics);
+  publisher.update({ ...episode, kind: "audio", title: "Private book title" }); await tick();
+  expect(diagnostics.mock.calls.map(call => call[0])).toEqual([
+    { event: "attempt", operation: "set", activityType: 2, titlePresent: true },
+    { event: "success", operation: "set", activityType: 2, titlePresent: true }
+  ]);
+  setActivity.mockRejectedValueOnce({ code: 4006, message: "private response details" });
+  publisher.update({ ...episode, paused: true }); await tick(5_000);
+  expect(diagnostics).toHaveBeenLastCalledWith({ event: "error", operation: "set", activityType: 3, titlePresent: true, errorKind: "rpc", code: 4006 });
+  expect(JSON.stringify(diagnostics.mock.calls)).not.toMatch(/Private book|private response|Death Note/);
+});
+
+it("distinguishes SDK response validation from timeouts and isolates a failing diagnostic observer", async () => {
+  const { context, setActivity } = fixture(); const diagnostics = vi.fn();
+  const publisher = createWatchPresence(context, diagnostics);
+  setActivity.mockRejectedValueOnce(Object.assign(new Error("private validation input"), { name: "ZodError" }));
+  publisher.update(episode); await tick();
+  expect(diagnostics).toHaveBeenLastCalledWith(expect.objectContaining({ event: "error", errorKind: "response_validation" }));
+  await tick(30_000);
+  setActivity.mockImplementationOnce(() => new Promise(() => {}));
+  publisher.update(episode); await tick(10_000);
+  expect(diagnostics).toHaveBeenLastCalledWith(expect.objectContaining({ event: "error", errorKind: "timeout" }));
+  await tick(30_000);
+  const next = createWatchPresence(context, () => { throw new Error("observer failed"); });
+  next.update(episode); await tick();
+  expect(setActivity).toHaveBeenCalledTimes(3);
 });

@@ -165,6 +165,10 @@ export function createActivityController(broker, installLaunch, deviceId) {
             const previous = party;
             const next = await call('getParty');
             if (closed || leaving || pending || logoutPending || generation !== revision) return false;
+            // A replacement server has no in-memory party yet. A verified
+            // Discord resume can reopen this already selected account once.
+            // Ordinary party removal still requires an explicit account choice.
+            if (refreshing && selection && !next) return false;
             if (!sameParty(previous, next)) {
                 party = next;
                 selection = undefined;

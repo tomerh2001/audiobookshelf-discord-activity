@@ -1,0 +1,62 @@
+/* One viewport owner: native pages scroll inside the space above the player. */
+.activity-shell {
+  --activity-player-height: 192px;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+  width: 100%;
+  height: 100vh;
+  height: 100dvh;
+  min-height: 0;
+  overflow: hidden;
+}
+.activity-appbar { flex: 0 0 64px; min-width: 0; }
+.activity-shell #app-content { flex: 1 1 0; min-height: 0; height: auto; overflow: hidden; }
+.activity-shell.activity-playing #app-content { padding-bottom: var(--activity-player-height); }
+.activity-shell #app-content > .page { height: 100%; max-height: 100%; min-height: 0; }
+.activity-shell #mediaPlayerContainer { height: var(--activity-player-height); }
+.activity-shell #siderail-buttons-container { max-height: calc(100dvh - 64px - 48px); }
+.activity-shell.activity-playing #siderail-buttons-container { max-height: calc(100dvh - 64px - 48px - var(--activity-player-height)); }
+@media (min-width: 1024px) { .activity-shell { --activity-player-height: 160px; } }
+
+.activity-party-button, .activity-back-button { display: inline-flex; flex: 0 0 36px; align-items: center; justify-content: center; width: 36px; height: 36px; border-radius: 4px; color: #d1d5db; }
+.activity-party-button { margin-left: 4px; }
+.activity-back-button { margin-right: 4px; }
+.activity-party-button:hover, .activity-back-button:hover { color: white; background: #ffffff14; }
+.activity-party-button:focus-visible, .activity-back-button:focus-visible { outline: 2px solid white; outline-offset: 2px; }
+.activity-appbar .activity-global-search { flex: 0 1 320px; min-width: 0; }
+.activity-appbar .activity-global-search > div:first-child { width: 100%; min-width: 0; }
+.activity-appbar .activity-account-button { flex-shrink: 0; }
+.activity-controls { position: relative; flex: 0 0 0; z-index: 70; }
+.activity-dialog-backdrop { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; background: #000a; padding: 12px; z-index: 500; }
+.activity-dialog { box-sizing: border-box; max-height: calc(100dvh - 24px); overflow: auto; width: 360px; max-width: 100%; background: #202124; padding: 20px; border-radius: 12px; color: #eee; }
+.activity-dialog h2 { font-size: 21px; margin-bottom: 15px; }
+.activity-dialog li { display: flex; align-items: center; gap: 10px; margin: 10px 0; overflow-wrap: anywhere; }
+.activity-dialog img { width: 32px; height: 32px; flex-shrink: 0; border-radius: 50%; }
+.activity-note { font-size: 12px; color: #b6b8bc; margin: 18px 0; }
+.activity-dialog button, .activity-unlock button, .activity-warning button, .activity-queue-controls button, .activity-queue-controls select { border: 1px solid #ffffff30; border-radius: 5px; padding: 4px 9px; background: #2e3034; color: white; cursor: pointer; }
+.activity-dialog button + button { margin-left: 8px; }
+.activity-warning { position: absolute; top: 0; left: 0; right: 0; padding: 8px 15px; background: #5b3b1a; color: #fff; max-height: min(120px, 35dvh); overflow: auto; }
+.activity-unlock { position: fixed; inset: auto 12px 12px; z-index: 400; max-height: calc(100dvh - 24px); overflow: auto; text-align: center; padding: 16px; background: #202124f5; color: #fff; border: 1px solid #fff5; border-radius: 12px; }
+.activity-unlock p { margin-bottom: 12px; }
+.activity-queue-actions { display: flex; flex-wrap: wrap; gap: 4px; justify-content: flex-end; max-width: 240px; }
+.activity-queue-actions button { padding: 4px 8px; border: 1px solid #ffffff40; border-radius: 4px; font-size: 12px; }
+.activity-queue-actions button:disabled, .activity-queue-controls button:disabled { opacity: .35; cursor: default; }
+.activity-queue-actions button:focus-visible, .activity-queue-controls :focus-visible { outline: 2px solid white; outline-offset: 2px; }
+.activity-queue-header { flex-wrap: wrap; row-gap: 8px; }
+.activity-queue-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 0 16px 16px; font-size: 13px; }
+.activity-queue-item .queue-item-row-content { min-width: 0; max-width: none; flex: 1; }
+@media (max-width: 480px) {
+  .activity-queue-item { flex-wrap: wrap; row-gap: 8px; }
+  .activity-queue-item .activity-queue-actions { width: 100%; max-width: none; }
+}
+
+/* PiP/grid is a compact view of the same player, including on first render. */
+.activity-preview .activity-appbar, .activity-preview #app-content, .activity-preview [aria-label="Library Sidebar"] { display: none !important; }
+.activity-preview #mediaPlayerContainer { position: relative; inset: auto; width: 100%; height: 100%; max-height: 100%; overflow-x: hidden; overflow-y: auto; padding: 8px; display: flex; flex-direction: column; }
+.activity-preview .activity-player-cover, .activity-preview .activity-player-options { display: none; }
+.activity-preview .activity-player-heading { padding-left: 0; margin-bottom: 4px; flex-shrink: 0; }
+.activity-preview .activity-player-heading .text-gray-400 { display: none; }
+.activity-preview .activity-player-ui { margin-top: 0; min-height: 120px; display: flex; flex-direction: column; justify-content: center; flex: 1 0 auto; }
+.activity-preview-empty { position: fixed; inset: 0; display: flex; flex-direction: column; justify-content: center; text-align: center; padding: 16px; background: #202124; color: #eee; }
+.activity-preview-empty p + p { margin-top: 8px; font-size: 12px; color: #b6b8bc; }

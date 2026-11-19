@@ -32,6 +32,8 @@ const server = http.createServer(async (req, res) => {
     if (req.method !== 'GET' && req.method !== 'HEAD') { const chunks = []; for await (const chunk of req) chunks.push(chunk); const raw = Buffer.concat(chunks).toString(); if (raw) body = JSON.parse(raw); }
     const json = (value: any, status = 200) => { res.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }); res.end(JSON.stringify(value)); };
     if (pathname === '/api/config') return json({ publicBaseUrl: origin, publicDiscordClientId: 'fixture-app' });
+    // Diagnostics are exercised by API tests; the synthetic UI fixture discards them.
+    if (pathname === '/api/diagnostics/presence' && req.method === 'POST') return json({ ok: true });
     if (pathname === '/api/discord/exchange') return json({ appToken: body.mockUser?.id || 'fixture-host', discordAccessToken: 'fixture-oauth', user: body.mockUser || { id: 'host', username: 'Host' }, expiresAt: new Date(Date.now() + 8 * 3600_000).toISOString() });
     if (pathname === '/api/connections' && req.method === 'GET') return json({ connections: connections.has(owner) ? [connections.get(owner)] : [], preferredConnectionId: preferences.get(owner) || null, communityAvailable: true, passwordEnabled: process.env.FIXTURE_OIDC_ONLY !== 'true', oidcEnabled: true });
     if (pathname === '/api/connections' && req.method === 'POST') { if (body.username !== 'demo' || body.password !== 'demo') return json({ error: { code: 'invalid_credentials', message: 'Use demo / demo for this synthetic fixture.' } }, 401); return json({ connection: connection(owner) }); }
@@ -88,11 +90,11 @@ const server = http.createServer(async (req, res) => {
     let panel = document.getElementById('fixture-presence');
     if (!panel) { panel = document.createElement('output'); panel.id = 'fixture-presence'; panel.setAttribute('role', 'status'); panel.style.cssText = 'pointer-events:none;position:fixed;top:0;right:0;z-index:99999;background:#111;color:white;padding:8px;font-size:12px;max-width:360px'; document.body.append(panel); }
     panel.textContent = 'Synthetic Discord status: ' + (payload.activity ? payload.activity.details + ' / ' + payload.activity.state : 'cleared');
-    return {};
+    return { name: 'Fixture Activity', type: 0, ...(payload.activity || {}) };
   } } };
-  broker.createWatchPresence = context => original({ ...context, isMock: false, isStandalone: false,
+  broker.createWatchPresence = (context, onDiagnostic) => original({ ...context, isMock: false, isStandalone: false,
     grantedScopes: ['identify', 'rpc.activities.write'], sdk,
-    application: { id: '1234567890', icon: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' } });
+    application: { id: '1234567890', icon: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' } }, onDiagnostic);
 })();
 `)]);
     }

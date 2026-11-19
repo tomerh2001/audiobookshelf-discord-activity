@@ -13,6 +13,7 @@ export { closeDiscordActivity, getConnectedParticipants } from "./discord/sdk.js
 export { observeActivityPresentation } from "./discord/presentation.js";
 export { observeActivityParticipants } from "./discord/participants.js";
 export { createWatchPresence } from "./discord/richPresence.js";
+export { createPresenceDiagnostics } from "./discord/presenceDiagnostics.js";
 
 export type { ActivitySession } from "./discord/session.js";
 export type { ActivityDiscordContext } from "./discord/sdk.js";

@@ -18,6 +18,9 @@ export default function ({ $axios, app }) {
     });
     $axios.onError(error => {
         if (error.activityStale) return Promise.reject(error);
+        if (error.config && error.config.activityRevision !== app.$activity?.state.accountRevision) {
+            return Promise.reject(Object.assign(new Error('This account changed.'), { activityStale: true }));
+        }
         const status = Number.isInteger(error.response?.status) ? error.response.status : undefined;
         if (status === 401) app.$activity?.reconnect();
         // Do not print upstream errors or capability-bearing request configs.
