@@ -3,13 +3,13 @@ import type { FastifyPluginAsync, FastifyReply } from "fastify";
 import { z } from "zod";
 import { AuthError, requireAppSession, sendAuthError } from "../plugins/auth.js";
 import { communityAvailable, connectCommunity, ConnectionError, connectWithPassword, disconnectConnection,
-  AudiobookshelfConnectionStore, suggestedServerUrl } from "../services/audiobookshelfConnections.js";
+  AudiobookshelfConnectionStore, identifyServer, clientConnection } from "../services/audiobookshelfConnections.js";
 import { AudiobookshelfOidcManager } from "../services/audiobookshelfOidc.js";
-import { normalizeUpstreamUrl, UpstreamPolicyError } from "../services/upstreamPolicy.js";
+import { normalizeUpstreamUrl, validateUpstream, UpstreamPolicyError } from "../services/upstreamPolicy.js";
 
-const loginSchema = z.object({ serverUrl: z.string().min(1).max(2048), username: z.string().trim().min(1).max(200),
+const loginSchema = z.object({ username: z.string().trim().min(1).max(200),
   password: z.string().max(4096) }).strict();
-const serverSchema = z.object({ serverUrl: z.string().min(1).max(2048) }).strict();
+const emptySchema = z.object({}).strict();
 const preferenceSchema = z.object({ connectionId: z.string().regex(/^[a-f0-9]{32}$/) }).strict();
 
 export const connectionRoutes: FastifyPluginAsync = async (app) => {
@@ -20,9 +20,12 @@ export const connectionRoutes: FastifyPluginAsync = async (app) => {
   app.get("/api/connections", async (request, reply) => {
     try {
       const session = await requireAppSession(request);
-      return reply.send({ connections: store.list(session.discordUserId, session.discordContext?.guildId), defaultServerUrl: suggestedServerUrl(app.envConfig),
-        canonicalDefaultServerUrl: normalizeUpstreamUrl(app.envConfig.AUDIOBOOKSHELF_DEFAULT_SERVER_URL),
-        communityAvailable: communityAvailable(app.envConfig, session), oidcEnabled: app.envConfig.AUDIOBOOKSHELF_OIDC_ENABLED,
+      const server = await identifyServer(await validateUpstream(app.envConfig, app.envConfig.AUDIOBOOKSHELF_DEFAULT_SERVER_URL));
+      return reply.send({ connections: store.list(session.discordUserId, session.discordContext?.guildId)
+        .filter(connection => connection.serverUrl === normalizeUpstreamUrl(app.envConfig.AUDIOBOOKSHELF_DEFAULT_SERVER_URL)).map(clientConnection),
+        communityAvailable: communityAvailable(app.envConfig, session),
+        passwordEnabled: server.authMethods.includes("local"),
+        oidcEnabled: app.envConfig.AUDIOBOOKSHELF_OIDC_ENABLED && server.authMethods.includes("openid"),
         preferredConnectionId: store.preferred(session.discordUserId, session.discordContext?.guildId) });
     } catch (error) { return sendError(reply, error); }
   });
@@ -32,15 +35,15 @@ export const connectionRoutes: FastifyPluginAsync = async (app) => {
       const session = await requireAppSession(request);
       const parsed = loginSchema.safeParse(request.body);
       if (!parsed.success) return invalidInput(reply);
-      const connection = await connectWithPassword(app.envConfig, session, parsed.data);
-      return reply.code(201).send({ connection });
+      const connection = await connectWithPassword(app.envConfig, session, { ...parsed.data, serverUrl: app.envConfig.AUDIOBOOKSHELF_DEFAULT_SERVER_URL });
+      return reply.code(201).send({ connection: clientConnection(connection) });
     } catch (error) { return sendError(reply, error); }
   });
 
   app.post("/api/connections/community", async (request, reply) => {
     try {
       const session = await requireAppSession(request);
-      return reply.code(201).send({ connection: await connectCommunity(app.envConfig, session) });
+      return reply.code(201).send({ connection: clientConnection(await connectCommunity(app.envConfig, session)) });
     } catch (error) { return sendError(reply, error); }
   });
 
@@ -64,14 +67,17 @@ export const connectionRoutes: FastifyPluginAsync = async (app) => {
   app.post("/api/connections/oidc", async (request, reply) => {
     try {
       const session = await requireAppSession(request);
-      const parsed = serverSchema.safeParse(request.body);
+      const parsed = emptySchema.safeParse(request.body ?? {});
       if (!parsed.success) return invalidInput(reply);
-      return reply.code(201).send(await oidc.start(session, parsed.data.serverUrl));
+      return reply.code(201).send(await oidc.start(session, app.envConfig.AUDIOBOOKSHELF_DEFAULT_SERVER_URL));
     } catch (error) { return sendError(reply, error); }
   });
 
   app.post<{ Params: { id: string } }>("/api/connections/oidc/:id/poll", async (request, reply) => {
-    try { return reply.send(oidc.poll(await requireAppSession(request), request.params.id)); }
+    try {
+      const result = oidc.poll(await requireAppSession(request), request.params.id);
+      return reply.send(result.status === "connected" ? { ...result, connection: clientConnection(result.connection) } : result);
+    }
     catch (error) { return sendError(reply, error); }
   });
 
@@ -108,7 +114,7 @@ function resultPage(success: boolean): string {
 }
 
 function invalidInput(reply: FastifyReply) {
-  return reply.code(400).send(apiError("invalid_connection_request", "Check the server address and login fields."));
+  return reply.code(400).send(apiError("invalid_connection_request", "Check your login details."));
 }
 
 function sendError(reply: FastifyReply, error: unknown) {

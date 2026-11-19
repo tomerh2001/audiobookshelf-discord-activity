@@ -1,5 +1,5 @@
 const ID = '[A-Za-z0-9_-]{1,100}';
-const BROWSE = new RegExp(`^/(?:|account|(?:item|author|series|collection|playlist)/${ID}|library/${ID}(?:/(?:bookshelf(?:/(?:all|books|series|authors|collections|playlists))?|search|stats|podcast/latest))?)$`);
+const BROWSE = new RegExp(`^/(?:|account|(?:item|author|series|collection|playlist)/${ID}|library/${ID}(?:/(?:bookshelf(?:/(?:all|books|series|authors|collections|playlists))?|search|stats|podcast/latest|series/${ID}))?)$`);
 const controls = (value: string) => [...value].some(character => character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127);
 const QUERY = new Set(['query', 'q', 'filter', 'sort', 'page', 'tab']);
 

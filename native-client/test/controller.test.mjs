@@ -2,9 +2,9 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createActivityController, preferredAccount } from '../src/controller.js';
 
-const connection = { id: 'account', serverId: 'server', serverUrl: 'https://media.example' };
-const party = { id: 'party', groupId: 'group', serverId: connection.serverId, serverUrl: connection.serverUrl };
-const matches = (account, group) => account.serverId === group.serverId && account.serverUrl === group.serverUrl;
+const connection = { id: 'account', serverId: 'server' };
+const party = { id: 'party', groupId: 'group', serverId: connection.serverId };
+const matches = (account, group) => account.serverId === group.serverId;
 const deferred = () => { let resolve; const promise = new Promise(done => { resolve = done; }); return { promise, resolve }; };
 function fixture(install) {
     let rejected;
@@ -30,10 +30,10 @@ function fixture(install) {
 }
 
 test('a preferred server never silently replaces an existing party', async () => {
-    const other = { ...connection, id: 'other', serverUrl: 'https://other.example' };
+    const other = { ...connection, id: 'other', serverId: 'other-server' };
     assert.equal(preferredAccount({ connections: [connection, other], preferredConnectionId: 'other' }, party, matches), undefined);
     const f = fixture(); await f.controller.start();
-    await assert.rejects(f.controller.select(other), /another Audiobookshelf server/);
+    await assert.rejects(f.controller.select(other), /library configuration changed/);
     assert.deepEqual(f.calls, ['start']);
     await f.controller.select(other, true);
     assert.ok(f.calls.includes('join'));

@@ -12,7 +12,7 @@ Use `--prepare-only` to extract and patch without installing dependencies or com
 
 ## Discord, accounts and login
 
-The native login screen uses Audiobookshelf form components and adds the server address, explicit community login, saved accounts and **Sign in with Authentik / SSO**. SSO opens the configured Audiobookshelf identity-provider flow in the external browser and polls the session-bound broker result. It supports Authentik through Audiobookshelf's native OIDC integration. Passwords are cleared after use; the real upstream credentials remain on the backend.
+The native login screen uses Audiobookshelf form components and offers explicit community login, saved accounts and **Sign in with Authentik**. The backend chooses the configured server; its address never appears in the login form or account metadata. Username/password fields appear only when the library enables local login. SSO opens the configured Audiobookshelf identity-provider flow in the external browser and polls the session-bound broker result. It supports Authentik through Audiobookshelf's native OIDC integration. Passwords are cleared after use; the real upstream credentials remain on the backend.
 
 The session library performs Discord authentication once. Its retained in-memory authorization can recover an expired broker session after independent backend verification. Signing out removes the selected saved account and returns to native login while Discord and other listeners remain connected. Account replacement invalidates pending native media preparation, rejects old HTTP responses and remounts account-owned views.
 

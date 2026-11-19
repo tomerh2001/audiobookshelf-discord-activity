@@ -2,6 +2,14 @@
 
 The Audiobookshelf adaptation is implemented in a separate checkout based on Jellyfin Watch `c8a0511`. The original Jellyfin checkout was unchanged. This report separates automated checks, simulated browser checks and limited live-service verification. It does not establish an end-to-end Discord or Authentik login.
 
+## Listening experience follow-up
+
+The November 19 follow-up removes server entry from login and all server addresses from connection/party responses. The deployment selects the library and its enabled login methods. It also adds queue ordering, Play next, shuffle, Clear upcoming, account switching without forgetting credentials, accessible dialogs, authorized live library refresh, podcast command choices, and custom Activity artwork.
+
+Rich Presence now recovers when its observer attaches after the native audio element has already begun playing, updates immediately on playback/buffering events, and distinguishes podcast shows and episode titles. The presence tests verify actual-media-state gating, paused/buffering state, and safe title payloads. They do not prove that Discord rendered a status on a real user's profile.
+
+The updated source passes 368 workspace tests (29 shared, 59 frontend, 280 API) and 84 native integration tests. Lint passes. Browser and deployment verification for this follow-up are recorded separately below when completed; the original checks below describe the earlier release.
+
 ## Automated checks
 
 | Check | Result |

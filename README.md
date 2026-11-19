@@ -7,8 +7,8 @@ Each operator supplies their own Discord application, public Activity address an
 ## Listen together
 
 1. Open **Audiobookshelf Listen** from a call's Activities menu, `/listen`, or **Apps → Listen to Audiobookshelf**.
-2. Connect your Audiobookshelf account with a server URL and password, choose **Sign in with Authentik / OpenID Connect**, or explicitly choose the operator's community account.
-3. Browse the native library and play a book. Other participants join the same Activity and connect an account on that server.
+2. Choose **Sign in with Authentik**, use your username and password when enabled, or explicitly choose the community account. The operator configures the library; listeners never enter its address.
+3. Browse the native library and play a book. Other participants join the same Activity and sign in to the configured library.
 4. Play, pause, seek, change speed or manage the shared queue. Each participant keeps their own volume and stream.
 
 The shared timeline supports late joins, local buffering, drift correction, duplicate queue entries, next/previous, repeat modes and reconnect recovery. Book positions cover all audio tracks. Chapters, bookmarks, playback sessions and personal listening progress use Audiobookshelf's native features. Podcast episodes can be selected through its native interface.
@@ -23,7 +23,7 @@ Community users need no personal Audiobookshelf account. The operator creates on
 
 `DISCORD_ACCESS_MODE=public` admits any verified participant in this Discord application's Activity. `restricted` uses configured guild/user allowlists. Community access has its own explicit `guilds` or `public` setting. Public mode still requires Discord authentication, current Activity membership and an authorized Audiobookshelf account.
 
-Authentik login uses the selected Audiobookshelf server's native OpenID Connect integration. The identity provider opens in an external browser; the Activity waits for completion. Configure Authentik in Audiobookshelf and add the Activity callback URI as described in [Authentik setup](docs/authentik.md). The Activity does not need an Authentik administrator token or client secret.
+Authentik login uses the configured Audiobookshelf server's native OpenID Connect integration. The identity provider opens in an external browser; the Activity waits for completion. Configure Authentik in Audiobookshelf and add the Activity callback URI as described in [Authentik setup](docs/authentik.md). The Activity does not need an Authentik administrator token or client secret.
 
 ## Discord controls
 
@@ -43,7 +43,7 @@ Copy `.env.example` to `.env`, generate independent session/encryption secrets, 
 
 The included workflow tests pull requests and publishes `ghcr.io/<repository-owner>/<repository-name>:latest` from `main` after checks pass. Set `ACTIVITY_IMAGE` to your published image when using registry deployment. This source checkout does not imply an image or Discord application has already been published.
 
-The backend protects media and saved tokens. Custom servers must use public HTTPS; the exact operator-configured default is the only private-network/HTTP exception. Tokens stay encrypted on the backend, browser capabilities remain in memory, upstream playback-session IDs are replaced with opaque aliases, and every media request passes the Activity gateway. See [security](docs/security.md).
+The backend protects media and saved tokens. The operator configures the upstream server. Login requests cannot choose or override it, and account/party responses omit its address. The exact configured default can use private HTTP/LAN access. Tokens stay encrypted on the backend, browser capabilities remain in memory, upstream playback-session IDs are replaced with opaque aliases, and every media request passes the Activity gateway. See [security](docs/security.md).
 
 ## Development
 

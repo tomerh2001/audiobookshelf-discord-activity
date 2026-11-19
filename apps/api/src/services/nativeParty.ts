@@ -73,7 +73,7 @@ export function publicNativeParty(party: NativeParty | undefined) {
     id: party.id, instanceId: party.instanceId,
     ...(party.guildId ? { guildId: party.guildId } : {}),
     ...(party.channelId ? { channelId: party.channelId } : {}),
-    serverId: party.serverId, serverUrl: party.serverUrl, groupId: party.groupId
+    serverId: party.serverId, groupId: party.groupId
   };
 }
 
@@ -517,27 +517,48 @@ export class NativePartyService {
     if (failure) throw failure;
   }
 
-  async command(viewer: NativeViewer, action: "pause" | "play" | "seek" | "next" | "previous" | "stop" | "queue" | "select" | "search" | "now", payload?: { query?: string; seconds?: number; itemIds?: string[] }): Promise<unknown> {
+  async command(viewer: NativeViewer, action: "pause" | "play" | "seek" | "next" | "previous" | "stop" | "queue" | "select" | "search" | "episodes" | "now", payload?: { query?: string; seconds?: number; itemIds?: string[]; items?: Array<{ itemId: string; episodeId?: string }> }): Promise<unknown> {
     await this.authorize(viewer.capability);
     const party = this.parties.get(viewer.partyId)!;
     if (!viewer.joined || !viewer.sockets) throw new NativeError("native_player_not_connected", 409);
     if (action === "search") {
       const response = await this.json(viewer, "GET", "/api/libraries") as { libraries?: Array<{ id: string }> };
-      const books: unknown[] = [];
+      const items: unknown[] = [];
       for (const library of (response.libraries ?? []).slice(0, 50)) {
         if (!/^[a-zA-Z0-9_-]{1,64}$/.test(library.id)) continue;
         const query = new URLSearchParams({ q: payload?.query ?? "", limit: "20" });
-        const result = await this.json(viewer, "GET", `/api/libraries/${library.id}/search?${query}`) as { book?: Array<{ libraryItem?: unknown }> };
-        books.push(...(result.book ?? []).flatMap((entry) => entry.libraryItem ? [entry.libraryItem] : []));
-        if (books.length >= 25) break;
+        const result = await this.json(viewer, "GET", `/api/libraries/${library.id}/search?${query}`) as {
+          book?: Array<{ libraryItem?: unknown }>; podcast?: Array<{ libraryItem?: unknown }>; episodes?: Array<{ libraryItem?: unknown }>
+        };
+        // Native episode matches carry recentEpisode; show matches omit their
+        // episodes and need a separate choice instead of an invalid book start.
+        items.push(...[...(result.book ?? []), ...(result.episodes ?? []), ...(result.podcast ?? [])]
+          .flatMap((entry) => entry.libraryItem ? [entry.libraryItem] : []));
+        if (items.length >= 25) break;
       }
-      return { items: books.slice(0, 25) };
+      return { items: items.slice(0, 25) };
+    }
+    if (action === "episodes") {
+      const itemId = payload?.itemIds?.[0];
+      if (!itemId || !/^[a-zA-Z0-9_-]{1,64}$/.test(itemId)) throw new NativeError("native_item_denied");
+      const item = await this.json(viewer, "GET", `/api/items/${itemId}?expanded=1`) as {
+        id?: string; mediaType?: string; media?: { episodes?: Array<{ id?: string; publishedAt?: number; addedAt?: number }> }
+      };
+      if (item.id !== itemId || item.mediaType !== "podcast") throw new NativeError("native_item_denied");
+      const episodes = [...(item.media?.episodes ?? [])]
+        .sort((left, right) => (right.publishedAt ?? right.addedAt ?? 0) - (left.publishedAt ?? left.addedAt ?? 0));
+      return { items: episodes.slice(0, 25).map(recentEpisode => ({ ...item, recentEpisode })), total: episodes.length };
     }
     if (action === "now") {
       const { snapshot } = await this.playback.get(viewer);
-      const itemId = snapshot.queue[snapshot.index]?.itemId;
-      const item = itemId ? await this.json(viewer, "GET", `/api/items/${itemId}`) as { media?: { metadata?: { title?: string } } } : undefined;
-      return { itemId, title: item?.media?.metadata?.title, positionSeconds: snapshot.positionTicks / 10_000_000,
+      const { itemId, episodeId } = snapshot.queue[snapshot.index] ?? {};
+      const item = itemId ? await this.json(viewer, "GET", `/api/items/${itemId}?expanded=1`) as {
+        media?: { metadata?: { title?: string }; episodes?: Array<{ id?: string; title?: string }> }
+      } : undefined;
+      const showTitle = item?.media?.metadata?.title;
+      const episodeTitle = episodeId ? item?.media?.episodes?.find(episode => episode.id === episodeId)?.title : undefined;
+      const title = episodeId ? [showTitle, episodeTitle || "Episode unavailable"].filter(Boolean).join(" — ") : showTitle;
+      return { itemId, episodeId, title, positionSeconds: snapshot.positionTicks / 10_000_000,
         isPaused: snapshot.paused, playbackRate: snapshot.playbackRate, groupId: party.groupId };
     }
     if (action === "seek") {
@@ -545,9 +566,9 @@ export class NativePartyService {
       return this.playback.control(viewer, (snapshot) => ({ type: "seek", positionTicks: Math.round(payload!.seconds! * 10_000_000), paused: snapshot.paused }));
     }
     if (action === "queue" || action === "select") {
-      const ids = payload?.itemIds ?? [];
-      if (!ids.length) throw new NativeError("native_queue_empty", 400);
-      const queue = ids.map((itemId) => ({ id: randomBytes(16).toString("hex"), itemId }));
+      const items = payload?.items ?? (payload?.itemIds ?? []).map(itemId => ({ itemId }));
+      if (!items.length) throw new NativeError("native_queue_empty", 400);
+      const queue = items.map((item) => ({ ...item, id: randomBytes(16).toString("hex") }));
       return this.playback.control(viewer, () => action === "queue" ? { type: "enqueue", queue }
         : { type: "setQueue", queue, index: 0, positionTicks: 0, paused: false });
     }

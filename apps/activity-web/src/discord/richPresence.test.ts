@@ -151,3 +151,13 @@ it("contains RPC failure, backs off until a fresh update and stops on a denied p
   publisher.update(episode); await tick(60_000);
   expect(setActivity).toHaveBeenCalledTimes(3);
 });
+
+
+it("publishes audiobooks and podcast episodes as listening with their actual titles", () => {
+  const book = { ...episode, kind: "audio" as const, title: "The Hobbit" };
+  expect(formatWatchActivity(book, epoch)).toMatchObject({ type: 2, details: "The Hobbit", state: "Playing" });
+  const podcast: WatchSnapshot = { ...episode, kind: "podcast", title: "The Long Journey", seriesName: "Stories at Night" };
+  delete podcast.seasonNumber; delete podcast.episodeNumber;
+  expect(formatWatchActivity(podcast, epoch)).toMatchObject({ type: 2, details: "Stories at Night", state: "The Long Journey · Playing" });
+  expect(formatWatchActivity({ ...podcast, paused: true }, epoch)).toMatchObject({ type: 2, state: "The Long Journey · Paused · 7:53 / 23:00", timestamps: null });
+});

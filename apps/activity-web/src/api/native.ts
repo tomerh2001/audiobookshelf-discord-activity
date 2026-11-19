@@ -4,23 +4,23 @@ import { withRequestTimeout } from "./requestTimeout.js";
 import { notifySessionRejected } from "./sessionRecovery.js";
 
 const connectionSchema = z.object({
-  id: z.string(), serverUrl: z.string(), serverId: z.string(), serverName: z.string(),
+  id: z.string(), serverId: z.string(),
   audiobookshelfUserId: z.string(), audiobookshelfUsername: z.string(), kind: z.enum(["personal", "community"]),
   createdAt: z.string(), updatedAt: z.string()
 });
 export type Connection = z.infer<typeof connectionSchema>;
 const connectionsSchema = z.object({
-  connections: z.array(connectionSchema), defaultServerUrl: z.string(), canonicalDefaultServerUrl: z.string(), communityAvailable: z.boolean(), oidcEnabled: z.boolean().default(false),
+  connections: z.array(connectionSchema), communityAvailable: z.boolean(), passwordEnabled: z.boolean(), oidcEnabled: z.boolean(),
   preferredConnectionId: z.string().nullable()
 });
 export type Connections = z.infer<typeof connectionsSchema>;
 const partySchema = z.object({
   id: z.string(), instanceId: z.string(), guildId: z.string().optional(), channelId: z.string().optional(),
-  serverId: z.string(), serverUrl: z.string(), groupId: z.string()
+  serverId: z.string(), groupId: z.string()
 });
 export type Party = z.infer<typeof partySchema>;
 export function matchesPartyServer(connection: Connection, party: Party) {
-  return connection.serverId === party.serverId && connection.serverUrl === party.serverUrl;
+  return connection.serverId === party.serverId;
 }
 export const nativeLaunchSchema = z.object({
   baseUrl: z.string().regex(/^\/abs\/[a-zA-Z0-9_-]+$/), accessToken: z.string().min(1),
@@ -65,7 +65,7 @@ async function request(path: string, token: string, method = "GET", body?: unkno
 export async function getConnections(token: string, signal?: AbortSignal) {
   return connectionsSchema.parse(await request("/api/connections", token, "GET", undefined, signal));
 }
-export async function connectAccount(token: string, input: { serverUrl: string; username: string; password: string }) {
+export async function connectAccount(token: string, input: { username: string; password: string }) {
   return z.object({ connection: connectionSchema }).parse(await request("/api/connections", token, "POST", input)).connection;
 }
 export async function connectCommunity(token: string) {
@@ -89,8 +89,8 @@ export async function launchNative(token: string, connectionId: string, deviceId
 export async function saveNativeRestore(token: string, connectionId: string, route: string, sequence: number, keepalive = false) {
   await request("/api/native/restore", token, "PUT", { connectionId, route, sequence }, undefined, keepalive);
 }
-export async function startOidcLogin(token: string, serverUrl: string) {
-  return oidcSchema.parse(await request("/api/connections/oidc", token, "POST", { serverUrl }));
+export async function startOidcLogin(token: string) {
+  return oidcSchema.parse(await request("/api/connections/oidc", token, "POST", {}));
 }
 export async function pollOidcLogin(token: string, id: string, signal?: AbortSignal) {
   return z.discriminatedUnion("status", [z.object({ status: z.literal("pending") }), z.object({ status: z.literal("connected"), connection: connectionSchema }), z.object({ status: z.literal("failed"), message: z.string() })])

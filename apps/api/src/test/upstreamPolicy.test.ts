@@ -8,7 +8,7 @@ import { isPublicAddress, normalizeUpstreamUrl, readUpstreamJson, upstreamFetch,
 vi.mock("node:dns/promises", () => ({ lookup: vi.fn() }));
 const dns = vi.mocked(lookup as (hostname: string, options: { all: true; verbatim: true }) => Promise<{ address: string; family: number }[]>);
 const servers: Server[] = [];
-const env = () => loadEnv({ NODE_ENV: "test", AUDIOBOOKSHELF_DEFAULT_SERVER_URL: "http://operator.internal:8096/audiobookshelf" });
+const env = () => loadEnv({ NODE_ENV: "test", AUDIOBOOKSHELF_ALLOW_CUSTOM_SERVERS: "true", AUDIOBOOKSHELF_DEFAULT_SERVER_URL: "http://operator.internal:8096/audiobookshelf" });
 
 afterEach(async () => {
   vi.resetAllMocks();

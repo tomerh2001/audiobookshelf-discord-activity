@@ -4,13 +4,15 @@ import { createActivityController, preferredAccount } from './controller';
 import { createActivitySocket } from './activitySocket';
 import { createNativePlayer } from './nativePlaybackAdapter';
 import { onDocumentExit } from './lifecycle';
+import { createLibraryRefresh } from './libraryRefresh';
+import { refreshNativeBrowse } from './browseRefresh';
 
 /** Nuxt owns the document. Discord and upstream credentials are separate. */
 export default async function (context, inject) {
     const { app, store, $axios } = context;
     const broker = window.AudiobookshelfWatch;
-    const state = Vue.observable({ error: '', accountRevision: 0, rosterOpen: false, roster: { participants: [], loading: true }, ready: false, blocked: false, preview: false, snapshot: null });
-    let socket, player, component, presence, roster, presentation, pendingRecovery, checkpoint = 0, closed = false;
+    const state = Vue.observable({ error: '', accountRevision: 0, browseRevision: 0, rosterOpen: false, roster: { participants: [], loading: true }, ready: false, blocked: false, preview: false, snapshot: null });
+    let socket, player, component, presence, roster, presentation, libraryRefresh, pendingRecovery, checkpoint = 0, closed = false;
     let history = [], routeStop, pollTimer, checkpointTimer;
     const activity = {
         state, baseUrl: '', controller: null,
@@ -25,6 +27,7 @@ export default async function (context, inject) {
             window.open(parsed.href, '_blank', 'noopener,noreferrer');
         },
         async logout() { await controller.logoutAccount(); teardownAccount(); clearAccount(); history = []; await app.router.replace('/login'); },
+        async switchAccounts() { controller.cancelSelection(); teardownAccount(); clearAccount(); history = []; await app.router.replace('/login'); },
         async leave() { await controller.leave(); teardownAccount(); clearAccount(); closed = true; state.error = 'You have left the listening party.'; await app.router.replace('/login'); },
         reconnect() {
             if (closed || pendingRecovery || !controller.selection) return pendingRecovery;
@@ -36,7 +39,7 @@ export default async function (context, inject) {
         attach(value) { component = value; startPlayer(); },
         detach(value) { if (component === value) { player?.dispose(); player = undefined; component = undefined; } },
         roster() { state.rosterOpen = true; roster?.refresh(); },
-        back() { if (history.length > 1) { history.pop(); app.router.replace(history.pop() || '/'); } else app.router.replace('/'); },
+        back() { if (activity.modalBack?.()) return; if (history.length > 1) { history.pop(); app.router.replace(history.pop() || '/'); } else app.router.replace('/'); },
         async home() { return home(); },
         unlock() { player?.unlock(); },
         async fullscreen() { try { if (document.fullscreenElement) await document.exitFullscreen(); else await document.documentElement.requestFullscreen(); } catch { app.$toast?.error('Fullscreen is unavailable in this Discord view.'); } }
@@ -63,6 +66,7 @@ export default async function (context, inject) {
         state.accountRevision++; activity.baseUrl = ''; state.snapshot = null; state.blocked = false;
     }
     function teardownAccount() {
+        libraryRefresh?.dispose(); libraryRefresh = undefined;
         player?.dispose(); player = undefined; socket?.close(); socket = undefined;
         presence?.dispose(); presence = undefined;
     }
@@ -91,9 +95,18 @@ export default async function (context, inject) {
         const first = (libraries.libraries || [])[0];
         if (first) { store.commit('libraries/setCurrentLibrary', { id: first.id }); await store.dispatch('libraries/fetch', first.id); }
         if (!current()) return;
+        const accountCurrent = () => !closed && activity.baseUrl === launch.baseUrl && store.state.user.user?.id === launch.userId;
+        libraryRefresh = createLibraryRefresh({ store, axios: $axios, router: app.router, eventBus: app.$eventBus, isCurrent: accountCurrent,
+            async onRefresh(ids) {
+                player?.invalidateItems(ids);
+                await refreshNativeBrowse(context, { isCurrent: accountCurrent, set: Vue.set,
+                    remount: async () => { state.browseRevision++; await Vue.nextTick(); } });
+            }, onError: message => app.$toast?.error(message) });
+        const refresh = libraryRefresh;
         socket = createActivitySocket(launch.baseUrl, {
             onExpired: () => activity.reconnect(),
             onNativeEvent(event, value) {
+                if (refresh.notify(event, value)) return;
                 if (event === 'user_updated' && value?.id === store.state.user.user?.id) { store.commit('user/setUser', value); return; }
                 if (['playlist_added', 'playlist_updated'].includes(event) && value?.userId === store.state.user.user?.id) { if (value.libraryId === store.state.libraries.currentLibraryId) store.commit('libraries/addUpdateUserPlaylist', value); app.$eventBus.$emit(event, value); return; }
                 if (event === 'playlist_removed' && value?.userId === store.state.user.user?.id) { if (value.libraryId === store.state.libraries.currentLibraryId) store.commit('libraries/removeUserPlaylist', value); app.$eventBus.$emit(event, value); return; }
