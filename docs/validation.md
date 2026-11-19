@@ -8,7 +8,9 @@ The November 19 follow-up removes server entry from login and all server address
 
 Rich Presence now recovers when its observer attaches after the native audio element has already begun playing, updates immediately on playback/buffering events, and distinguishes podcast shows and episode titles. The presence tests verify actual-media-state gating, paused/buffering state, and safe title payloads. They do not prove that Discord rendered a status on a real user's profile.
 
-The updated source passes 368 workspace tests (29 shared, 59 frontend, 280 API) and 84 native integration tests. Lint passes. Browser and deployment verification for this follow-up are recorded separately below when completed; the original checks below describe the earlier release.
+The follow-up passed 368 workspace tests (29 shared, 59 frontend, 280 API), 84 native integration tests, production builds, TypeScript and lint. A subsequent focused regression raises the native suite to 85 cases: an observer that first sees stalled media must wait for enough buffered data or a real playing event before publishing playback. All 14 player-adapter cases pass after that correction. The original checks below describe the earlier release.
+
+The rebuilt interface also passed a headed-browser check using synthetic community login and generated audio. The login showed the custom brand and enabled sign-in choices without a server field. Real native playback produced `The Listening Room / Playing` through the compiled Rich Presence formatter into a synthetic SDK receiver. This receiver makes no Discord call, so it proves the native playback-to-status path rather than Discord's profile rendering.
 
 ## Automated checks
 
