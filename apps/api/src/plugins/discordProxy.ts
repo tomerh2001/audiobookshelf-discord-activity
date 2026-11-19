@@ -27,6 +27,10 @@ export function discordProxyPlugin(env: AppEnv): FastifyPluginAsync {
         // Discord interaction callbacks have independent exact-body signatures.
         // The handler rejects unsigned/invalid callbacks; this is not public auth.
         return;
+      } else if (request.method === "GET" && (request.url.split("?", 1)[0] === "/api/connections/oidc/callback"
+        || /^\/api\/connections\/oidc\/start\/[a-f0-9]{32}$/.test(request.url.split("?", 1)[0] ?? ""))) {
+        // External OIDC handoff has its own single-use ticket, state, PKCE and browser binding.
+        return;
       } else if (verifyProxy(request.headers)) {
         return;
       }

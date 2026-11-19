@@ -17,7 +17,7 @@ it("loads a passive facade outside Discord and overlaps one Activity handshake w
   const chunk = chunks[0]!;
   expect(chunk.fileName).toBe("activity-session.js");
   for (const inActivity of [false, true]) {
-    const { window } = new JSDOM("<!doctype html><body><main>Native Jellyfin</main></body>", { url: `https://activity.test/${inActivity ? '?frame_id=frame' : ''}`, runScripts: "outside-only" });
+    const { window } = new JSDOM("<!doctype html><body><main>Native Audiobookshelf</main></body>", { url: `https://activity.test/${inActivity ? '?frame_id=frame' : ''}`, runScripts: "outside-only" });
     const before = window.document.documentElement.outerHTML;
     const href = window.location.href;
     try {
@@ -25,11 +25,11 @@ it("loads a passive facade outside Discord and overlaps one Activity handshake w
       const postMessage = vi.spyOn(window, "postMessage");
       for (const property of ["localStorage", "sessionStorage"]) Object.defineProperty(window, property, { get: () => { throw new Error("Storage is unavailable"); } });
       window.eval(chunk.code);
-      const facade = window.JellyfinWatch;
+      const facade = window.AudiobookshelfWatch;
       expect(Object.keys(facade).sort()).toEqual([
         "StartupTimeout", "clearActivitySession", "closeDiscordActivity", "connectAccount", "connectCommunity", "createWatchPresence", "deleteConnection",
         "getConnectedParticipants", "getConnections", "getParty", "joinParty", "launchNative", "logout", "matchesPartyServer", "normalizeNativeRoute",
-        "observeActivityParticipants", "observeActivityPresentation", "onSessionRejected", "pollQuickConnect", "resumeActivitySession", "saveNativeRestore", "savePreference", "startActivitySession", "startQuickConnect"
+        "observeActivityParticipants", "observeActivityPresentation", "onSessionRejected", "pollOidcLogin", "resumeActivitySession", "saveNativeRestore", "savePreference", "startActivitySession", "startOidcLogin"
       ]);
       expect(Object.values(facade).every(value => typeof value === "function")).toBe(true);
       expect(window.document.documentElement.outerHTML).toBe(before);

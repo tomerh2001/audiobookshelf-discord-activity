@@ -42,7 +42,7 @@ function loggerOptions(env: AppEnv) {
         "req.headers.cookie",
         "req.headers.x-discord-proxy-payload",
         "req.headers.x-signature-ed25519",
-        "req.headers.x-jellyfin-discord-edge",
+        "req.headers.x-audiobookshelf-discord-edge",
         "DISCORD_PROXY_EDGE_SECRET",
         "*.DISCORD_PROXY_EDGE_SECRET",
         "*.discord_proxy_edge_secret",
@@ -51,6 +51,10 @@ function loggerOptions(env: AppEnv) {
         "*.token",
         "*.appToken",
         "*.accessToken",
+        "*.refreshToken",
+        "*.refresh_token",
+        "req.headers.x-refresh-token",
+        "res.headers.x-refresh-token",
         "*.AccessToken",
         "*.Pw",
         "*.Secret",
@@ -102,10 +106,10 @@ export function redactUrl(url: string | undefined): string | undefined {
   const query = parsed.searchParams.toString();
   const pathname = parsed.pathname
     .replace(/^(\/media\/(?:hls|direct)\/)[^/]+/, "$1[redacted]")
-    .replace(/^(\/jf\/)[^/]+/, "$1[redacted]");
+    .replace(/^(\/abs\/)[^/]+/, "$1[redacted]");
   return `${pathname}${query ? `?${query}` : ""}`;
 }
 
 function isSensitiveQueryKey(key: string): boolean {
-  return ["token", "code", "api_key", "apikey", "u", "access_token", "refresh_token", "client_secret"].includes(key.toLowerCase());
+  return ["ticket", "state", "token", "code", "api_key", "apikey", "u", "access_token", "refresh_token", "client_secret"].includes(key.toLowerCase());
 }

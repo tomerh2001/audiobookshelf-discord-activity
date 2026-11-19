@@ -14,7 +14,7 @@ export default defineConfig({
   build: {
     lib: {
       entry: path.join(currentDir, "src/library.ts"),
-      name: "JellyfinWatch",
+      name: "AudiobookshelfWatch",
       formats: ["iife"],
       fileName: () => "activity-session.js"
     }

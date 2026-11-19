@@ -33,7 +33,7 @@ test('a preferred server never silently replaces an existing party', async () =>
     const other = { ...connection, id: 'other', serverUrl: 'https://other.example' };
     assert.equal(preferredAccount({ connections: [connection, other], preferredConnectionId: 'other' }, party, matches), undefined);
     const f = fixture(); await f.controller.start();
-    await assert.rejects(f.controller.select(other), /another Jellyfin server/);
+    await assert.rejects(f.controller.select(other), /another Audiobookshelf server/);
     assert.deepEqual(f.calls, ['start']);
     await f.controller.select(other, true);
     assert.ok(f.calls.includes('join'));

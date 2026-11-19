@@ -1,78 +1,72 @@
-<img src="apps/activity-web/public/branding/jellyfin-watch-icon.png" alt="Jellyfin Watch" width="96" height="96" />
+# Audiobookshelf Listen
 
-# Jellyfin Watch
+Listen to audiobooks together inside a Discord call using Audiobookshelf's native web interface. This project adapts [Jellyfin Watch](https://github.com/tomerh2001/jellyfin-discord-activity), retaining its Discord authentication, saved connections, community accounts and shared playback coordinator.
 
-Watch Jellyfin together in a Discord call using the official Jellyfin Web interface and an Activity playback coordinator. The Activity adds Discord authentication, saved Jellyfin connections, participant visibility and a protected gateway around the native client.
+Each operator supplies their own Discord application, public Activity address and Audiobookshelf configuration. No particular Discord guild, Audiobookshelf server or Authentik instance is required.
 
-Jellyfin Web is the Activity document. Discord authentication, native sign-in, library browsing and playback run in that same document. The existing Jellyfin SyncPlay button opens **Watch party** in the native header and video controls.
+## Listen together
 
-## Watch together
+1. Open **Audiobookshelf Listen** from a call's Activities menu, `/listen`, or **Apps → Listen to Audiobookshelf**.
+2. Connect your Audiobookshelf account with a server URL and password, choose **Sign in with Authentik / OpenID Connect**, or explicitly choose the operator's community account.
+3. Browse the native library and play a book. Other participants join the same Activity and connect an account on that server.
+4. Play, pause, seek, change speed or manage the shared queue. Each participant keeps their own volume and stream.
 
-1. Join a voice channel and open **Jellyfin Watch** from that call's **Activities** menu. You can also run `/watch` or use **Apps → Watch Jellyfin** on a user/message inside that voice channel's text chat.
-2. Use Jellyfin's native login page to enter your server URL and sign in, or explicitly choose the community user where configured. Your connection is remembered for your Discord account, with a preferred connection for each Discord server.
-3. Browse Jellyfin normally and play a movie, episode or series. Friends join the running Discord Activity, connect their own account to the same Jellyfin server, and follow the current watch party automatically.
-4. Use Jellyfin's player and queue to pause, seek, skip to the next/previous episode, change the title, or add something to play next. Use Discord's native invite or Join Activity controls to bring friends into the same session.
+The shared timeline supports late joins, local buffering, drift correction, duplicate queue entries, next/previous, repeat modes and reconnect recovery. Book positions cover all audio tracks. Chapters, bookmarks, playback sessions and personal listening progress use Audiobookshelf's native features. Podcast episodes can be selected through its native interface.
 
-The native **Watch party** button shows the people in this Activity, with live join and leave updates. Use Jellyfin's native **Sign out** to return to login and switch between personal and community accounts. To use a different server, start another Activity. Joining an existing party requires an account on its current server; a saved preference never replaces another viewer's party automatically.
+Audiobookshelf v2.38.0 has no native group-playback protocol. Its session `sync` endpoint saves progress. This Activity therefore uses the playback coordinator inherited from Jellyfin Watch, with Audiobookshelf's native player, sessions, direct audio and HLS transcoding. [Upstream evidence](docs/upstream-research.md) records the inspected version and routes.
 
-Playback and the queue are shared. Volume, audio track, subtitles and quality belong to each viewer. Every viewer needs permission to watch the selected content. An operator may also offer a clearly labelled **community account** with shared watch history; personal accounts remain available.
+## Accounts and access
 
-| Discord command | Behavior |
+Personal and community accounts remain separate choices. Saved connections belong to a Discord user, with a preferred connection per Discord server. Joining an existing Activity preserves its server; choosing another account cannot silently replace someone else's party. Signing out disconnects the selected account while leaving Discord connected.
+
+Community users need no personal Audiobookshelf account. The operator creates one restricted Audiobookshelf user and supplies its credentials on the backend. Community viewers have separate playback devices and sessions, but share that account's history and bookmarks. One active viewer writes shared progress so other devices do not continually overwrite it.
+
+`DISCORD_ACCESS_MODE=public` admits any verified participant in this Discord application's Activity. `restricted` uses configured guild/user allowlists. Community access has its own explicit `guilds` or `public` setting. Public mode still requires Discord authentication, current Activity membership and an authorized Audiobookshelf account.
+
+Authentik login uses the selected Audiobookshelf server's native OpenID Connect integration. The identity provider opens in an external browser; the Activity waits for completion. Configure Authentik in Audiobookshelf and add the Activity callback URI as described in [Authentik setup](docs/authentik.md). The Activity does not need an Authentik administrator token or client secret.
+
+## Discord controls
+
+| Command | Behavior |
 | --- | --- |
-| `/watch` or Apps → Watch Jellyfin | Open the Activity in the channel where invoked |
-| `/jellyfin play query:…` | Find and play a movie or episode |
-| `/jellyfin pause` / `resume` | Pause or resume the watch party |
-| `/jellyfin seek seconds:…` | Seek the group |
-| `/jellyfin next` / `previous` | Move through the native queue |
-| `/jellyfin stop` | Stop group playback |
-| `/jellyfin now` | Show the native player's current title and position |
+| `/listen` or Apps → Listen to Audiobookshelf | Open the Activity in the invoked channel |
+| `/audiobookshelf play query:…` | Search accessible libraries and play a book |
+| `/audiobookshelf pause`, `resume`, `seek` | Control the shared timeline |
+| `/audiobookshelf next`, `previous`, `stop` | Move through or clear the queue |
+| `/audiobookshelf now` | Show the current title and position |
 
-Starting from a different text channel creates a party in that channel; it does not move to your voice call. Friends must join the same running Activity to share playback. Launching does not post an invitation automatically after the [app entry point is configured](docs/discord-setup.md#install-and-register-commands); use Discord's own invitation controls when you want to share one.
+Control commands verify the caller's current voice channel and active player. Replies are private to that caller. Launching never posts an invitation automatically; use Discord's own invitation controls. The participant panel and Rich Presence follow the running Activity.
 
-Playback controls use the caller's current voice channel and require their active player in that channel's Activity. Command replies are visible only to the caller. All authorized Activity viewers can control playback. Local controls apply before network acknowledgements; buffering viewers catch up independently. Signing out revokes the selected Jellyfin connection while keeping Discord connected.
+## Self-host
 
-## Desktop and mobile
+Copy `.env.example` to `.env`, generate independent session/encryption secrets, and configure [Discord](docs/discord-setup.md), [Audiobookshelf](docs/audiobookshelf-setup.md) and [deployment](docs/deployment.md). Build and start with `docker compose up -d --build`. The optional Caddy profile supplies HTTPS once its domain and DNS are configured.
 
-The Activity uses Jellyfin's responsive web client in Discord's embedded browser. Enable Web, iOS and Android in the Developer Portal. If autoplay is blocked, Jellyfin's **Join playback** dialog offers **Tap to play on this device**. Volume, tracks, subtitles, quality and fullscreen use the native player controls. Available codecs, fullscreen, background playback and operating-system picture-in-picture depend on Discord and the device; this does not launch the installed Jellyfin app. Each viewer receives a separate stream, so transcoding and bandwidth grow with the party.
+The included workflow tests pull requests and publishes `ghcr.io/<repository-owner>/<repository-name>:latest` from `main` after checks pass. Set `ACTIVITY_IMAGE` to your published image when using registry deployment. This source checkout does not imply an image or Discord application has already been published.
 
-Layout changes keep the same player and Discord connection. If an app session is interrupted, the open Activity can obtain a new session after Discord verifies its existing in-memory authorization and current membership. A failed verification grants no access; native connection dialogs offer **Try again** for a temporary outage, or ask you to reopen the Activity if required. Signing out requires another explicit Jellyfin login.
-
-Verify the compiled client in a browser after integration changes. Responsive browser checks do not establish physical iOS/Android playback or guaranteed fullscreen in the outer Discord application.
-
-## Deploy
-
-The default branch publishes `ghcr.io/tomerh2001/jellyfin-discord-activity:latest` after checks pass. Copy `.env.example`, configure [Discord](docs/discord-setup.md), then follow [deployment](docs/deployment.md) and [security](docs/security.md).
-
-Production requires strong credentials, an allowed Discord server/user and trusted Activity ingress proof. Generic servers must use public HTTPS. The exact operator-configured default URL is the only permitted private-network or HTTP target. All browser requests use the Activity's mapped origin; real Jellyfin tokens stay encrypted on the backend. Discord authorization and opaque gateway credentials stay in document memory. The native client's browser storage is replaced with document-local memory, and persistent response/service-worker caches are disabled.
+The backend protects media and saved tokens. Custom servers must use public HTTPS; the exact operator-configured default is the only private-network/HTTP exception. Tokens stay encrypted on the backend, browser capabilities remain in memory, upstream playback-session IDs are replaced with opaque aliases, and every media request passes the Activity gateway. See [security](docs/security.md).
 
 ## Development
 
-Build the pinned Jellyfin Web12 client with Node24/npm11:
+Use Node 24 and the pinned pnpm version:
 
-```bash
-node native-client/build.mjs
-```
-
-Use the pinned pnpm version through Corepack for the workspace:
-
-```bash
+```sh
 corepack enable
 pnpm install --frozen-lockfile
-node --test native-client/test/*.test.mjs
+pnpm build:native
 pnpm build
 pnpm typecheck
 pnpm lint
 pnpm test
+node --test native-client/test/*.test.mjs
 cp -R apps/activity-web/dist/. native-client/dist/
 ```
 
-The last command combines the session library and branding assets with the native client for local API serving. The Dockerfile packages the complete document using Node24. Install workspace dependencies before running native DOM tests. Isolated development can use `NODE_ENV=development`, `DEV_AUTH_MOCK=true` and `VITE_DEV_DISCORD_MOCK=true`; production rejects mock authentication. The native source pin, patches and build instructions are in [native-client](native-client/README.md).
+The native build pins Audiobookshelf v2.38.0 and verifies its source archive digest. Development mock authentication requires both `DEV_AUTH_MOCK=true` and `VITE_DEV_DISCORD_MOCK=true`; production refuses mock authentication. See [native integration](native-client/README.md).
 
-## Documentation and licensing
+Physical iOS/Android playback, background audio and Discord's external-browser handoff require device testing. Browser tests cannot establish those behaviors. Each participant receives a separate stream, so server bandwidth and transcoding capacity must cover the party. Saved accounts persist across restarts; active timelines do not.
 
-- [Jellyfin connections](docs/jellyfin-setup.md)
-- [API and gateway](docs/api.md)
-- [Troubleshooting](docs/troubleshooting.md)
-- [Security](docs/security.md)
+See the [feature mapping](docs/feature-parity.md) and [validation report](docs/validation.md) for the inherited features, completed checks and remaining live-deployment checks.
 
-This fork derives from [camarokris/jellyfin-discord-activity](https://github.com/camarokris/jellyfin-discord-activity). The session library and backend retain the [MIT license](LICENSE). The bundled [Jellyfin Web](https://github.com/jellyfin/jellyfin-web) client and its modifications are GPL-2.0-or-later; its license and source revision ship with the native assets. This repository contains the adapter and reproducible source-build recipe. Original `plan.md` describes the retired custom player.
+## Licensing
+
+The original Activity backend and integration retain the [MIT license](LICENSE) and attribution to [camarokris/jellyfin-discord-activity](https://github.com/camarokris/jellyfin-discord-activity) and the Jellyfin Watch fork. Audiobookshelf and modifications to its native web client are GPL-3.0-only. The native build packages its license, source revision and modified source; redistributors must preserve the corresponding-source obligations.

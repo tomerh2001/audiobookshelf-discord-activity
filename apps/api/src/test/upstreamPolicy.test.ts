@@ -8,7 +8,7 @@ import { isPublicAddress, normalizeUpstreamUrl, readUpstreamJson, upstreamFetch,
 vi.mock("node:dns/promises", () => ({ lookup: vi.fn() }));
 const dns = vi.mocked(lookup as (hostname: string, options: { all: true; verbatim: true }) => Promise<{ address: string; family: number }[]>);
 const servers: Server[] = [];
-const env = () => loadEnv({ NODE_ENV: "test", JELLYFIN_DEFAULT_SERVER_URL: "http://operator.internal:8096/jellyfin" });
+const env = () => loadEnv({ NODE_ENV: "test", AUDIOBOOKSHELF_DEFAULT_SERVER_URL: "http://operator.internal:8096/audiobookshelf" });
 
 afterEach(async () => {
   vi.resetAllMocks();
@@ -17,7 +17,7 @@ afterEach(async () => {
   })));
 });
 
-describe("Jellyfin upstream policy", () => {
+describe("Audiobookshelf upstream policy", () => {
   it.each(["0.0.0.0", "10.1.2.3", "100.100.100.100", "127.0.0.1", "169.254.169.254", "172.16.0.1",
     "192.168.1.1", "192.0.0.8", "198.18.0.1", "203.0.113.10", "224.0.0.1", "255.255.255.255",
     "::", "::1", "::ffff:127.0.0.1", "::ffff:8.8.8.8", "64:ff9b::808:808", "fc00::1", "fe80::1",
@@ -30,62 +30,62 @@ describe("Jellyfin upstream policy", () => {
   });
 
   it.each(["https://127.1", "https://2130706433", "https://0x7f000001", "https://[::ffff:127.0.0.1]"])("blocks alternate private-IP spelling %s", async (serverUrl) => {
-    await expect(validateUpstream(env(), serverUrl)).rejects.toMatchObject({ code: "jellyfin_server_not_allowed" });
+    await expect(validateUpstream(env(), serverUrl)).rejects.toMatchObject({ code: "audiobookshelf_server_not_allowed" });
     expect(dns).not.toHaveBeenCalled();
   });
 
   it("rejects mixed DNS answers and a later public-to-private rebinding", async () => {
     dns.mockResolvedValueOnce([{ address: "8.8.8.8", family: 4 }, { address: "127.0.0.1", family: 4 }]);
-    await expect(validateUpstream(env(), "https://mixed.example")).rejects.toMatchObject({ code: "jellyfin_server_not_allowed" });
+    await expect(validateUpstream(env(), "https://mixed.example")).rejects.toMatchObject({ code: "audiobookshelf_server_not_allowed" });
     dns.mockResolvedValueOnce([{ address: "8.8.8.8", family: 4 }]);
     await expect(validateUpstream(env(), "https://rebind.example")).resolves.toMatchObject({ address: "8.8.8.8" });
     dns.mockResolvedValueOnce([{ address: "10.0.0.1", family: 4 }]);
-    await expect(validateUpstream(env(), "https://rebind.example")).rejects.toMatchObject({ code: "jellyfin_server_not_allowed" });
+    await expect(validateUpstream(env(), "https://rebind.example")).rejects.toMatchObject({ code: "audiobookshelf_server_not_allowed" });
   });
 
   it("allows the exact operator URL, while denying other HTTP/private URLs and disabled custom servers", async () => {
     dns.mockResolvedValue([{ address: "10.40.0.9", family: 4 }]);
-    await expect(validateUpstream(env(), "http://operator.internal:8096/jellyfin/")).resolves.toMatchObject({ operatorApproved: true });
-    for (const serverUrl of ["http://operator.internal:8096/other", "http://public.example", "https://operator.internal:8096/jellyfin"]) {
-      await expect(validateUpstream(env(), serverUrl)).rejects.toMatchObject({ code: "jellyfin_server_not_allowed" });
+    await expect(validateUpstream(env(), "http://operator.internal:8096/audiobookshelf/")).resolves.toMatchObject({ operatorApproved: true });
+    for (const serverUrl of ["http://operator.internal:8096/other", "http://public.example", "https://operator.internal:8096/audiobookshelf"]) {
+      await expect(validateUpstream(env(), serverUrl)).rejects.toMatchObject({ code: "audiobookshelf_server_not_allowed" });
     }
-    await expect(validateUpstream({ ...env(), JELLYFIN_ALLOW_CUSTOM_SERVERS: false }, "https://public.example"))
-      .rejects.toMatchObject({ code: "jellyfin_server_not_allowed" });
+    await expect(validateUpstream({ ...env(), AUDIOBOOKSHELF_ALLOW_CUSTOM_SERVERS: false }, "https://public.example"))
+      .rejects.toMatchObject({ code: "audiobookshelf_server_not_allowed" });
   });
 
   it("maps only the exact configured public alias to the approved default before DNS lookup", async () => {
-    const operator = { ...env(), JELLYFIN_PUBLIC_SERVER_URL: "https://media.example/jellyfin" };
+    const operator = { ...env(), AUDIOBOOKSHELF_PUBLIC_SERVER_URL: "https://media.example/audiobookshelf" };
     dns.mockResolvedValue([{ address: "10.40.0.9", family: 4 }]);
-    const canonical = await validateUpstream(operator, operator.JELLYFIN_DEFAULT_SERVER_URL);
-    const alias = await validateUpstream(operator, "https://MEDIA.example:443/jellyfin/");
+    const canonical = await validateUpstream(operator, operator.AUDIOBOOKSHELF_DEFAULT_SERVER_URL);
+    const alias = await validateUpstream(operator, "https://MEDIA.example:443/audiobookshelf/");
     expect(alias).toEqual(canonical);
-    expect(alias).toMatchObject({ serverUrl: "http://operator.internal:8096/jellyfin", operatorApproved: true });
+    expect(alias).toMatchObject({ serverUrl: "http://operator.internal:8096/audiobookshelf", operatorApproved: true });
     expect(dns.mock.calls.map(([hostname]) => hostname)).toEqual(["operator.internal", "operator.internal"]);
-    await expect(validateUpstream({ ...operator, JELLYFIN_ALLOW_CUSTOM_SERVERS: false }, operator.JELLYFIN_PUBLIC_SERVER_URL))
+    await expect(validateUpstream({ ...operator, AUDIOBOOKSHELF_ALLOW_CUSTOM_SERVERS: false }, operator.AUDIOBOOKSHELF_PUBLIC_SERVER_URL))
       .resolves.toEqual(canonical);
   });
 
   it("does not expand public alias approval to another scheme, port, host, or path", async () => {
-    const operator = { ...env(), JELLYFIN_PUBLIC_SERVER_URL: "https://media.example/jellyfin" };
+    const operator = { ...env(), AUDIOBOOKSHELF_PUBLIC_SERVER_URL: "https://media.example/audiobookshelf" };
     dns.mockResolvedValue([{ address: "10.40.0.9", family: 4 }]);
-    for (const serverUrl of ["http://media.example/jellyfin", "https://media.example:8443/jellyfin",
-      "https://media.example", "https://media.example/jellyfin/admin", "https://other.example/jellyfin",
-      "https://media.example.evil.example/jellyfin"]) {
-      await expect(validateUpstream(operator, serverUrl)).rejects.toMatchObject({ code: "jellyfin_server_not_allowed" });
+    for (const serverUrl of ["http://media.example/audiobookshelf", "https://media.example:8443/audiobookshelf",
+      "https://media.example", "https://media.example/audiobookshelf/admin", "https://other.example/audiobookshelf",
+      "https://media.example.evil.example/audiobookshelf"]) {
+      await expect(validateUpstream(operator, serverUrl)).rejects.toMatchObject({ code: "audiobookshelf_server_not_allowed" });
     }
-    for (const serverUrl of ["https://secret@media.example/jellyfin", "https://media.example/jellyfin?target=internal",
-      "https://media.example/jellyfin#fragment"]) {
-      await expect(validateUpstream(operator, serverUrl)).rejects.toMatchObject({ code: "invalid_jellyfin_url" });
+    for (const serverUrl of ["https://secret@media.example/audiobookshelf", "https://media.example/audiobookshelf?target=internal",
+      "https://media.example/audiobookshelf#fragment"]) {
+      await expect(validateUpstream(operator, serverUrl)).rejects.toMatchObject({ code: "invalid_audiobookshelf_url" });
     }
     expect(dns.mock.calls.every(([hostname]) => hostname !== "operator.internal")).toBe(true);
-    await expect(validateUpstream(env(), "https://media.example/jellyfin"))
-      .rejects.toMatchObject({ code: "jellyfin_server_not_allowed" });
+    await expect(validateUpstream(env(), "https://media.example/audiobookshelf"))
+      .rejects.toMatchObject({ code: "audiobookshelf_server_not_allowed" });
   });
 
   it("requires HTTPS for the operator's optional user-facing alias", () => {
-    expect(loadEnv({ NODE_ENV: "test" }).JELLYFIN_PUBLIC_SERVER_URL).toBe("");
-    expect(() => loadEnv({ NODE_ENV: "test", JELLYFIN_PUBLIC_SERVER_URL: "http://media.example" })).toThrow();
-    expect(() => loadEnv({ NODE_ENV: "test", JELLYFIN_PUBLIC_SERVER_URL: "ftp://media.example" })).toThrow();
+    expect(loadEnv({ NODE_ENV: "test" }).AUDIOBOOKSHELF_PUBLIC_SERVER_URL).toBe("");
+    expect(() => loadEnv({ NODE_ENV: "test", AUDIOBOOKSHELF_PUBLIC_SERVER_URL: "http://media.example" })).toThrow();
+    expect(() => loadEnv({ NODE_ENV: "test", AUDIOBOOKSHELF_PUBLIC_SERVER_URL: "ftp://media.example" })).toThrow();
   });
 
   it.each(["ftp://public.example", "https://user:password@public.example", "https://public.example?a=b",
@@ -95,9 +95,9 @@ describe("Jellyfin upstream policy", () => {
   });
 
   it("keeps API/media paths under the configured base and never accepts a second origin", () => {
-    const target: ValidatedUpstream = { serverUrl: "https://media.example/jellyfin", hostname: "media.example", address: "8.8.8.8", family: 4, operatorApproved: false };
-    expect(upstreamUrl(target, "/Users/Me?value=%2f").toString()).toBe("https://media.example/jellyfin/Users/Me?value=%2f");
-    for (const value of ["https://evil.example/jellyfin", "https://media.example/admin", "../admin", "/%2e%2e/admin", "/a%252fb", "/a\\b"]) {
+    const target: ValidatedUpstream = { serverUrl: "https://media.example/audiobookshelf", hostname: "media.example", address: "8.8.8.8", family: 4, operatorApproved: false };
+    expect(upstreamUrl(target, "/Users/Me?value=%2f").toString()).toBe("https://media.example/audiobookshelf/Users/Me?value=%2f");
+    for (const value of ["https://evil.example/audiobookshelf", "https://media.example/admin", "../admin", "/%2e%2e/admin", "/a%252fb", "/a\\b"]) {
       expect(() => upstreamUrl(target, value)).toThrow();
     }
   });
@@ -109,9 +109,9 @@ describe("Jellyfin upstream policy", () => {
       response.setHeader("Set-Cookie", "upstream-secret=hidden");
       response.end(JSON.stringify({ ok: true }));
     }));
-    const operator = { ...env(), JELLYFIN_DEFAULT_SERVER_URL: `http://pinned.example:${port}/jellyfin` };
+    const operator = { ...env(), AUDIOBOOKSHELF_DEFAULT_SERVER_URL: `http://pinned.example:${port}/audiobookshelf` };
     dns.mockResolvedValueOnce([{ address: "127.0.0.1", family: 4 }]);
-    const target = await validateUpstream(operator, operator.JELLYFIN_DEFAULT_SERVER_URL);
+    const target = await validateUpstream(operator, operator.AUDIOBOOKSHELF_DEFAULT_SERVER_URL);
     dns.mockResolvedValue([{ address: "127.0.0.2", family: 4 }]);
     const response = await upstreamFetch(target, "/System/Info/Public", { headers: { Host: "evil.example", Authorization: "fixture-token" } });
     expect(await readUpstreamJson(response)).toEqual({ ok: true });
@@ -133,10 +133,10 @@ describe("Jellyfin upstream policy", () => {
     const port = await listen(createServer((_request, response) => {
       response.writeHead(307, { Location: `http://127.0.0.1:${destination}/password` }); response.end();
     }));
-    const operator = { ...env(), JELLYFIN_DEFAULT_SERVER_URL: `http://127.0.0.1:${port}` };
-    const target = await validateUpstream(operator, operator.JELLYFIN_DEFAULT_SERVER_URL);
+    const operator = { ...env(), AUDIOBOOKSHELF_DEFAULT_SERVER_URL: `http://127.0.0.1:${port}` };
+    const target = await validateUpstream(operator, operator.AUDIOBOOKSHELF_DEFAULT_SERVER_URL);
     await expect(upstreamFetch(target, "/Users/AuthenticateByName", { method: "POST", body: "private-password", headers: { Authorization: "private-token" } }))
-      .rejects.toMatchObject({ code: "jellyfin_redirect_rejected" });
+      .rejects.toMatchObject({ code: "audiobookshelf_redirect_rejected" });
     expect(leaked).toBe(0);
   });
 
@@ -149,9 +149,9 @@ describe("Jellyfin upstream policy", () => {
     });
     server.on("connection", () => { connections++; });
     const port = await listen(server);
-    const operator = { ...env(), JELLYFIN_DEFAULT_SERVER_URL: `http://pinned.example:${port}` };
+    const operator = { ...env(), AUDIOBOOKSHELF_DEFAULT_SERVER_URL: `http://pinned.example:${port}` };
     dns.mockResolvedValue([{ address: "127.0.0.1", family: 4 }]);
-    const target = await validateUpstream(operator, operator.JELLYFIN_DEFAULT_SERVER_URL);
+    const target = await validateUpstream(operator, operator.AUDIOBOOKSHELF_DEFAULT_SERVER_URL);
     for (const authorization of ["fixture-first", "fixture-second", "fixture-first"]) {
       expect(await (await upstreamFetch(target, "/Items", { headers: { Authorization: authorization } })).text()).toBe("ok");
     }
@@ -169,12 +169,12 @@ describe("Jellyfin upstream policy", () => {
     servers.push(server);
     await new Promise<void>((resolve) => server.listen(0, "0.0.0.0", resolve));
     const port = (server.address() as { port: number }).port;
-    const operator = { ...env(), JELLYFIN_DEFAULT_SERVER_URL: `http://pinned.example:${port}` };
+    const operator = { ...env(), AUDIOBOOKSHELF_DEFAULT_SERVER_URL: `http://pinned.example:${port}` };
     dns.mockResolvedValueOnce([{ address: "127.0.0.1", family: 4 }]);
-    const first = await validateUpstream(operator, operator.JELLYFIN_DEFAULT_SERVER_URL);
+    const first = await validateUpstream(operator, operator.AUDIOBOOKSHELF_DEFAULT_SERVER_URL);
     await (await upstreamFetch(first, "/Items")).text();
     dns.mockResolvedValueOnce([{ address: "127.0.0.2", family: 4 }]);
-    const second = await validateUpstream(operator, operator.JELLYFIN_DEFAULT_SERVER_URL);
+    const second = await validateUpstream(operator, operator.AUDIOBOOKSHELF_DEFAULT_SERVER_URL);
     await (await upstreamFetch(second, "/Items")).text();
     await (await upstreamFetch(first, "/Items")).text();
     expect(addresses).toEqual(["127.0.0.1", "127.0.0.2", "127.0.0.1"]);
@@ -187,8 +187,8 @@ describe("Jellyfin upstream policy", () => {
       else response.end("ok");
     });
     const port = await listen(server);
-    const operator = { ...env(), JELLYFIN_DEFAULT_SERVER_URL: `http://127.0.0.1:${port}` };
-    const target = await validateUpstream(operator, operator.JELLYFIN_DEFAULT_SERVER_URL);
+    const operator = { ...env(), AUDIOBOOKSHELF_DEFAULT_SERVER_URL: `http://127.0.0.1:${port}` };
+    const target = await validateUpstream(operator, operator.AUDIOBOOKSHELF_DEFAULT_SERVER_URL);
     await (await upstreamFetch(target, "/ready")).text();
     const controller = new AbortController();
     const response = await upstreamFetch(target, "/slow", { signal: controller.signal });
@@ -203,8 +203,8 @@ describe("Jellyfin upstream policy", () => {
     const server = createServer((_request, response) => { setTimeout(() => response.end("ok"), 20); });
     server.on("connection", () => { connections++; });
     const port = await listen(server);
-    const operator = { ...env(), JELLYFIN_DEFAULT_SERVER_URL: `http://127.0.0.1:${port}` };
-    const target = await validateUpstream(operator, operator.JELLYFIN_DEFAULT_SERVER_URL);
+    const operator = { ...env(), AUDIOBOOKSHELF_DEFAULT_SERVER_URL: `http://127.0.0.1:${port}` };
+    const target = await validateUpstream(operator, operator.AUDIOBOOKSHELF_DEFAULT_SERVER_URL);
     const results = await Promise.all(Array.from({ length: 70 }, async () => (await upstreamFetch(target, "/Items")).text()));
     expect(results).toEqual(Array(70).fill("ok"));
     expect(connections).toBeGreaterThan(1);
@@ -217,8 +217,8 @@ describe("Jellyfin upstream policy", () => {
     const port = await listen(server);
     const responses: Response[] = [];
     for (let index = 0; index < 33; index++) {
-      const operator = { ...env(), JELLYFIN_DEFAULT_SERVER_URL: `http://127.0.0.1:${port}/server-${index}` };
-      const target = await validateUpstream(operator, operator.JELLYFIN_DEFAULT_SERVER_URL);
+      const operator = { ...env(), AUDIOBOOKSHELF_DEFAULT_SERVER_URL: `http://127.0.0.1:${port}/server-${index}` };
+      const target = await validateUpstream(operator, operator.AUDIOBOOKSHELF_DEFAULT_SERVER_URL);
       responses.push(await upstreamFetch(target, "/stream"));
     }
     expect(held).toHaveLength(33);
@@ -229,11 +229,11 @@ describe("Jellyfin upstream policy", () => {
 
   it("aborts stalled transfers and bounds JSON bodies", async () => {
     const port = await listen(createServer((_request, _response) => undefined));
-    const operator = { ...env(), JELLYFIN_DEFAULT_SERVER_URL: `http://127.0.0.1:${port}` };
-    const target = await validateUpstream(operator, operator.JELLYFIN_DEFAULT_SERVER_URL);
-    await expect(upstreamFetch(target, "/slow", { signal: AbortSignal.timeout(30) })).rejects.toMatchObject({ code: "jellyfin_server_unreachable" });
+    const operator = { ...env(), AUDIOBOOKSHELF_DEFAULT_SERVER_URL: `http://127.0.0.1:${port}` };
+    const target = await validateUpstream(operator, operator.AUDIOBOOKSHELF_DEFAULT_SERVER_URL);
+    await expect(upstreamFetch(target, "/slow", { signal: AbortSignal.timeout(30) })).rejects.toMatchObject({ code: "audiobookshelf_server_unreachable" });
     await expect(readUpstreamJson(new Response(JSON.stringify({ long: "x".repeat(100) })), 32))
-      .rejects.toMatchObject({ code: "invalid_jellyfin_response" });
+      .rejects.toMatchObject({ code: "invalid_audiobookshelf_response" });
   });
 });
 

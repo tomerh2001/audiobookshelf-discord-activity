@@ -34,7 +34,7 @@ describe("Discord signed interactions", () => {
   it("launches allowed callers and refuses a server outside the allowlist", async () => {
     const app = await buildApp(loadEnv({ NODE_ENV: "test", DISCORD_PUBLIC_KEY: publicHex, DISCORD_ALLOWED_GUILD_IDS: "allowed" }));
     try {
-      const interaction = { id: "launch", application_id: "dev-client-id", type: 2, guild_id: "allowed", member: { user: { id: "user" } }, data: { name: "Watch Jellyfin" } };
+      const interaction = { id: "launch", application_id: "dev-client-id", type: 2, guild_id: "allowed", member: { user: { id: "user" } }, data: { name: "Listen to Audiobookshelf" } };
       const payload = JSON.stringify(interaction);
       expect((await app.inject({ method: "POST", url: "/api/discord/interactions", payload, headers: signed(payload) })).json()).toEqual({ type: 12 });
       const denied = JSON.stringify({ ...interaction, id: "denied", guild_id: "other" });

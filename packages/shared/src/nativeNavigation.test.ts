@@ -1,29 +1,11 @@
-import { describe, expect, it } from "vitest";
-import { normalizeNativeRoute } from "./nativeNavigation.js";
+import { describe, expect, it } from 'vitest';
+import { normalizeNativeRoute } from './nativeNavigation.js';
 
-const LIBRARY = "11111111111111111111111111111111";
-const SERVER = "selected-server";
-
-describe("native browsing checkpoints", () => {
-  it.each(["homevideos", "musicvideos", "boxsets", "playlists", "mixed", "books"])("restores the Modern %s library and selected tab", (route) => {
-    const hash = `#/${route}?topParentId=${LIBRARY}&collectionType=${route}&tab=1&serverId=${SERVER}`;
-    expect(normalizeNativeRoute(hash, SERVER)).toBe(hash);
-    expect(normalizeNativeRoute(`#/${route}?topParentId=${LIBRARY}`, SERVER)).toBe(`#/${route}?topParentId=${LIBRARY}`);
+describe('native Audiobookshelf browsing checkpoints', () => {
+  it.each(['/', '/account', '/library/lib_123', '/library/9abc-def/bookshelf/series', '/library/library-id/podcast/latest', '/item/item-uuid', '/author/author-id', '/series/series-id', '/collection/col_123', '/playlist/pl_123', '/library/lib_123/search?query=The+Hobbit'])('restores browsing route %s', route => {
+    expect(normalizeNativeRoute(route, 'selected-server')).toBe(route);
   });
-
-  it.each([
-    `#/mixed?topParentId=${LIBRARY}&ApiKey=secret`,
-    `#/books?topParentId=${LIBRARY}&serverId=another-server`,
-    `#/musicvideos?topParentId=${LIBRARY}&tab=1&tab=2`,
-    "#/homevideos?topParentId=https%3A%2F%2Fevil.example",
-    "#/playlists?collectionType=unknown",
-    "#/boxsets?tab=-1",
-    "#/video",
-    "#/login",
-    "#/dashboard",
-    "#/SyncPlay/Stop",
-    "https://evil.example/#/mixed"
-  ])("rejects unsafe or non-browsing checkpoint %s", (hash) => {
-    expect(normalizeNativeRoute(hash, SERVER)).toBeNull();
+  it.each(['/api/me', '/abs/capability/api/me', '/login', '/config', '/item/id/play', '/item/../config', '/item/id?token=secret', '/item/id?query=secret&query=second', '/library/lib_123/search?query=https%3A%2F%2Fevil.example', '/item/id#x', '//evil.example', 'https://evil.example/item/id', '/item/%2fapi', '/library/id/search?page=-1'])('rejects a credential, command, or external route %s', route => {
+    expect(normalizeNativeRoute(route, 'selected-server')).toBeNull();
   });
 });

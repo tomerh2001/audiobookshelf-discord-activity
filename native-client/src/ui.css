@@ -1,9 +1,0 @@
-/* All dialogs and forms use Jellyfin Modern's MUI components and theme. */
-.discordModernDialog .MuiDialogContent-root {
-    padding-bottom: max(20px, env(safe-area-inset-bottom));
-    overflow-wrap: anywhere;
-}
-.discordModernDialog .MuiButton-root {
-    min-height: 44px;
-    white-space: normal;
-}

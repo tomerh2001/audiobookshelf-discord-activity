@@ -94,17 +94,17 @@ export function normalizeUpstreamUrl(value: string): string {
  */
 export async function validateUpstream(env: AppEnv, value: string): Promise<ValidatedUpstream> {
   const requestedUrl = normalizeUpstreamUrl(value);
-  const defaultUrl = normalizeUpstreamUrl(env.JELLYFIN_DEFAULT_SERVER_URL);
+  const defaultUrl = normalizeUpstreamUrl(env.AUDIOBOOKSHELF_DEFAULT_SERVER_URL);
   // Operators can expose a public URL that resolves privately on their own
   // network. Map only that exact configured alias to the already-approved
   // default. Never DNS-resolve it, follow redirects, or grant its host/path a
   // broader private-network exception. Stored connections keep one identity.
-  const serverUrl = env.JELLYFIN_PUBLIC_SERVER_URL
-    && requestedUrl === normalizeUpstreamUrl(env.JELLYFIN_PUBLIC_SERVER_URL) ? defaultUrl : requestedUrl;
+  const serverUrl = env.AUDIOBOOKSHELF_PUBLIC_SERVER_URL
+    && requestedUrl === normalizeUpstreamUrl(env.AUDIOBOOKSHELF_PUBLIC_SERVER_URL) ? defaultUrl : requestedUrl;
   const operatorApproved = serverUrl === defaultUrl;
   const url = new URL(serverUrl);
-  if (!operatorApproved && (!env.JELLYFIN_ALLOW_CUSTOM_SERVERS || url.protocol !== "https:")) {
-    throw new UpstreamPolicyError("jellyfin_server_not_allowed", "Use an allowed Jellyfin server with HTTPS.");
+  if (!operatorApproved && (!env.AUDIOBOOKSHELF_ALLOW_CUSTOM_SERVERS || url.protocol !== "https:")) {
+    throw new UpstreamPolicyError("audiobookshelf_server_not_allowed", "Use an allowed Audiobookshelf server with HTTPS.");
   }
   const hostname = url.hostname.replace(/^\[|\]$/g, "");
   let answers: { address: string; family: number }[];
@@ -118,10 +118,10 @@ export async function validateUpstream(env: AppEnv, value: string): Promise<Vali
           dnsDeadline.unref();
         })
       ]);
-  } catch { throw new UpstreamPolicyError("jellyfin_server_unreachable", "Could not resolve the Jellyfin server.", 502); }
+  } catch { throw new UpstreamPolicyError("audiobookshelf_server_unreachable", "Could not resolve the Audiobookshelf server.", 502); }
   finally { clearTimeout(dnsDeadline); }
   if (!answers.length || answers.some((answer) => !isIP(answer.address) || (!operatorApproved && !isPublicAddress(answer.address)))) {
-    throw new UpstreamPolicyError("jellyfin_server_not_allowed", "This server address is not allowed.");
+    throw new UpstreamPolicyError("audiobookshelf_server_not_allowed", "This server address is not allowed.");
   }
   const first = answers[0]!;
   return Object.freeze({ serverUrl, hostname, address: first.address, family: first.family as 4 | 6, operatorApproved });
@@ -153,7 +153,7 @@ export function upstreamUrl(target: ValidatedUpstream, path: string | URL): URL 
   const basePath = base.pathname.replace(/\/$/, "");
   if (url.origin !== base.origin || url.username || url.password || url.hash
     || (url.pathname !== basePath && !url.pathname.startsWith(`${basePath}/`))) {
-    throw new UpstreamPolicyError("invalid_upstream_path", "The requested Jellyfin path is not allowed.");
+    throw new UpstreamPolicyError("invalid_upstream_path", "The requested Audiobookshelf path is not allowed.");
   }
   return url;
 }
@@ -161,10 +161,17 @@ export function upstreamUrl(target: ValidatedUpstream, path: string | URL): URL 
 /** Streaming HTTP transport. DNS is never re-resolved after policy validation.
  * No redirect is followed, including same-origin redirects carrying credentials.
  */
-export async function upstreamFetch(target: ValidatedUpstream, path: string | URL, init: RequestInit = {}): Promise<Response> {
+export async function upstreamFetch(target: ValidatedUpstream, path: string | URL, init: RequestInit = {}, options: { allowOidcRedirect?: boolean; includeCookies?: boolean; oidcPublicOrigin?: string } = {}): Promise<Response> {
   const url = upstreamUrl(target, path);
   const headers = new Headers(init.headers);
   for (const name of ["host", "connection", "proxy-authorization", "proxy-connection", "transfer-encoding", "upgrade"]) headers.delete(name);
+  if (options.oidcPublicOrigin) {
+    // Only the OIDC service supplies this from the operator's exact public alias
+    // or the validated selected server. DNS and sockets remain pinned to target.
+    const origin = new URL(options.oidcPublicOrigin);
+    headers.set("host", origin.host);
+    headers.set("x-forwarded-proto", origin.protocol.slice(0, -1));
+  }
   headers.set("accept-encoding", "identity");
   const method = init.method ?? "GET";
   const controller = new AbortController();
@@ -181,15 +188,17 @@ export async function upstreamFetch(target: ValidatedUpstream, path: string | UR
       clearTimeout(headerDeadline);
       response.on("close", cleanup);
       const status = response.statusCode ?? 502;
-      if (status >= 300 && status < 400 && status !== 304) {
+      if (status >= 300 && status < 400 && status !== 304 && !options.allowOidcRedirect) {
         response.destroy(); cleanup();
-        reject(new UpstreamPolicyError("jellyfin_redirect_rejected", "The Jellyfin server redirected the request. Check its URL.", 502));
+        reject(new UpstreamPolicyError("audiobookshelf_redirect_rejected", "The Audiobookshelf server redirected the request. Check its URL.", 502));
         return;
       }
       const responseHeaders = new Headers();
       for (const [name, value] of Object.entries(response.headers)) {
-        if (value !== undefined && !["set-cookie", "connection", "transfer-encoding"].includes(name)) {
-          responseHeaders.set(name, Array.isArray(value) ? value.join(", ") : value);
+        if (value !== undefined && !["connection", "transfer-encoding"].includes(name) && (name !== "set-cookie" || options.includeCookies)) {
+          if (name === "set-cookie" && Array.isArray(value)) {
+            for (const cookie of value) responseHeaders.append(name, cookie);
+          } else responseHeaders.set(name, Array.isArray(value) ? value.join(", ") : value);
         }
       }
       const noBody = method === "HEAD" || [204, 205, 304].includes(status);
@@ -202,7 +211,7 @@ export async function upstreamFetch(target: ValidatedUpstream, path: string | UR
     req.setTimeout(30_000, () => req.destroy(new Error("upstream_idle_timeout")));
     req.on("error", () => {
       clearTimeout(headerDeadline); cleanup();
-      reject(new UpstreamPolicyError("jellyfin_server_unreachable", "The Jellyfin server request failed.", 502));
+      reject(new UpstreamPolicyError("audiobookshelf_server_unreachable", "The Audiobookshelf server request failed.", 502));
     });
     if (init.body == null) req.end();
     else if (typeof init.body === "string" || init.body instanceof URLSearchParams) req.end(String(init.body));
@@ -220,7 +229,7 @@ export async function upstreamFetch(target: ValidatedUpstream, path: string | UR
 
 export async function readUpstreamJson(response: Response, limit = 256 * 1024): Promise<unknown> {
   const reader = response.body?.getReader();
-  if (!reader) throw new UpstreamPolicyError("invalid_jellyfin_response", "The server returned an invalid response.", 502);
+  if (!reader) throw new UpstreamPolicyError("invalid_audiobookshelf_response", "The server returned an invalid response.", 502);
   const chunks: Uint8Array[] = [];
   let length = 0;
   try {
@@ -234,7 +243,7 @@ export async function readUpstreamJson(response: Response, limit = 256 * 1024): 
     return JSON.parse(Buffer.concat(chunks).toString("utf8")) as unknown;
   } catch {
     await reader.cancel().catch(() => undefined);
-    throw new UpstreamPolicyError("invalid_jellyfin_response", "The server returned an invalid response.", 502);
+    throw new UpstreamPolicyError("invalid_audiobookshelf_response", "The server returned an invalid response.", 502);
   }
 }
 
@@ -250,5 +259,5 @@ function hasControlCharacters(value: string, includeSpace = false): boolean {
 }
 
 function invalidUrl(): UpstreamPolicyError {
-  return new UpstreamPolicyError("invalid_jellyfin_url", "Enter a valid Jellyfin server URL without credentials, a query, or a fragment.");
+  return new UpstreamPolicyError("invalid_audiobookshelf_url", "Enter a valid Audiobookshelf server URL without credentials, a query, or a fragment.");
 }

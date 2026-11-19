@@ -1,22 +1,22 @@
 {
-  "name": "jellyfin-discord-activity",
+  "name": "audiobookshelf-discord-activity",
   "version": "0.1.0",
   "private": true,
-  "description": "Self-hosted Discord Activity for Jellyfin watch parties.",
+  "description": "Self-hosted Discord Activity for shared Audiobookshelf listening with Authentik login.",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/tomerh2001/jellyfin-discord-activity.git"
+    "url": "https://github.com/tomerh2001/audiobookshelf-discord-activity.git"
   },
   "bugs": {
-    "url": "https://github.com/tomerh2001/jellyfin-discord-activity/issues"
+    "url": "https://github.com/tomerh2001/audiobookshelf-discord-activity/issues"
   },
-  "homepage": "https://github.com/tomerh2001/jellyfin-discord-activity#readme",
+  "homepage": "https://github.com/tomerh2001/audiobookshelf-discord-activity#readme",
   "keywords": [
-    "jellyfin",
+    "audiobookshelf",
     "discord",
     "discord-activity",
-    "watch-party",
+    "listen-together",
     "self-hosted"
   ],
   "type": "module",

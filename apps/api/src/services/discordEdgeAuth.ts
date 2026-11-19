@@ -1,7 +1,7 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 import type { IncomingHttpHeaders } from "node:http";
 
-export const discordEdgeHeader = "x-jellyfin-discord-edge";
+export const discordEdgeHeader = "x-audiobookshelf-discord-edge";
 
 /** Encode at least 32 random bytes as hex or unpadded base64url. */
 export function isStrongDiscordEdgeSecret(value: string): boolean {

@@ -300,7 +300,7 @@ test('transport uses the existing authenticated native socket and capability-sco
     const apiClient = { isWebSocketOpen: () => true,
         subscribe: (types, callback) => { assert.deepEqual(types, ['ActivityPlaybackState', 'ActivityPlaybackError']); onMessage = callback; return () => { unsubscribed = true; }; },
         _sdk: { webSocket: { onStatusChange: callback => { onStatus = callback; return () => {}; }, sendMessage: value => sent.push(value) } } };
-    const transport = createActivityPlaybackTransport({ apiClient, baseUrl: '/jf/test-capability/',
+    const transport = createActivityPlaybackTransport({ apiClient, baseUrl: '/abs/test-capability/',
         fetchImpl: async (url, options) => { requests.push({ url, options }); return { ok: true, json: async () => ({ snapshot: initial(), clientId: 'self' }) }; } });
     const states = [], errors = [], statuses = [];
     const stop = transport.subscribe(value => states.push(value), value => errors.push(value), value => statuses.push(value));
@@ -310,7 +310,7 @@ test('transport uses the existing authenticated native socket and capability-sco
     onMessage({ MessageType: 'ActivityPlaybackError', Data: 'error' });
     onStatus(1); onStatus('disconnected');
     await transport.snapshot();
-    assert.equal(requests[0].url, '/jf/test-capability/Activity/Playback');
+    assert.equal(requests[0].url, '/abs/test-capability/Activity/Playback');
     assert.equal(requests[0].options.credentials, 'omit');
     assert.equal(requests[0].options.cache, 'no-store');
     assert.deepEqual(states, ['snapshot']); assert.deepEqual(errors, ['error']); assert.deepEqual(statuses, [true, false]);
@@ -324,7 +324,7 @@ test('transport refreshes on visible, pageshow and online without reconnecting a
     let unsubscribed = 0;
     const apiClient = { isWebSocketOpen: () => true, subscribe: () => () => { unsubscribed++; },
         _sdk: { webSocket: { onStatusChange: () => () => { unsubscribed++; } } } };
-    const transport = createActivityPlaybackTransport({ apiClient, baseUrl: '/jf/test-capability', host });
+    const transport = createActivityPlaybackTransport({ apiClient, baseUrl: '/abs/test-capability', host });
     const stop = transport.subscribe(() => {}, () => {}, () => {}, () => { resumes++; });
     host.document.dispatchEvent(new Event('visibilitychange'));
     host.dispatchEvent(new Event('online'));
@@ -454,7 +454,7 @@ test('initial authorization failure does not retry an expired watch session', as
 
 test('startup and mobile recovery retry gateway failures and aborted requests with native error codes', async () => {
     for (const error of [
-        Object.assign(new Error('upstream unavailable'), { statusCode: 502, code: 'jellyfin_request_failed' }),
+        Object.assign(new Error('upstream unavailable'), { statusCode: 502, code: 'audiobookshelf_request_failed' }),
         Object.assign(new Error('rate limited'), { statusCode: 429, code: 'rate_limited' }),
         new DOMException('request timed out', 'AbortError')
     ]) {
@@ -483,7 +483,7 @@ test('startup and mobile recovery retry gateway failures and aborted requests wi
 
 test('snapshot transport preserves HTTP status so transient failures can be retried safely', async () => {
     for (const status of [401, 403, 429, 502]) {
-        const transport = createActivityPlaybackTransport({ baseUrl: '/jf/test-capability', apiClient: {},
+        const transport = createActivityPlaybackTransport({ baseUrl: '/abs/test-capability', apiClient: {},
             fetchImpl: async () => ({ ok: false, status, json: async () => ({ error: { code: 'gateway_error' } }) }) });
         await assert.rejects(transport.snapshot(), error => error.statusCode === status && error.code === 'gateway_error');
         transport.dispose();

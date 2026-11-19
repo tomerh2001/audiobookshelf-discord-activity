@@ -1,4 +1,4 @@
-import { ConnectionError } from "../services/jellyfinConnections.js";
+import { ConnectionError } from "../services/audiobookshelfConnections.js";
 import type { FastifyPluginAsync } from "fastify";
 import { z } from "zod";
 import { AuthError, requireAppSession, sendAuthError } from "../plugins/auth.js";
@@ -59,17 +59,19 @@ export function nativeRouteError(error: unknown, reply: import("fastify").Fastif
       reply.header("X-Application-Error-Code", error.code);
     }
     const messages: Record<string, string> = {
-      native_playback_denied: "Your Jellyfin account does not have permission to play media.",
-      activity_queue_changed: "Someone changed the queue. Follow the current episode and try again.",
+      party_server_mismatch: "This Activity already uses another Audiobookshelf server. Join with an account on that server or start a new Activity.",
+      native_shared_progress_read_only: "Another active listener is saving progress for this shared account.",
+      native_playback_denied: "Your Audiobookshelf account does not have permission to play media.",
+      activity_queue_changed: "Someone changed the queue. Follow the current book and try again.",
       activity_stale_command: "This playback action arrived too late. Follow the current party and try again.",
       activity_invalid_command: "This playback action is invalid. Reopen the selection and try again.",
-      activity_invalid_queue: "This selection has an invalid queue. Choose an individual movie, episode or season.",
-      native_invalid_queue: "Jellyfin sent an invalid playback queue. Open a movie or an individual episode and try again.",
-      native_queue_empty: "Jellyfin returned no playable items for this selection. Open an individual movie or episode and try again.",
-      native_queue_too_large: "This selection has more than 500 items. Choose a season or a smaller selection."
+      activity_invalid_queue: "This selection has an invalid queue. Choose an book or podcast episode.",
+      native_invalid_queue: "Audiobookshelf sent an invalid playback queue. Open a book or podcast episode and try again.",
+      native_queue_empty: "Audiobookshelf returned no playable items for this selection. Open an book or podcast episode and try again.",
+      native_queue_too_large: "This selection has more than 500 items. Choose a smaller selection."
     };
-    return reply.code(error.statusCode).send({ error: { code: error.code, message: messages[error.code] ?? "The native Jellyfin request could not be completed." } });
+    return reply.code(error.statusCode).send({ error: { code: error.code, message: messages[error.code] ?? "The native Audiobookshelf request could not be completed." } });
   }
   // Never log an upstream exception whose request options may contain credentials.
-  return reply.code(502).send({ error: { code: "native_upstream_failed", message: "Jellyfin is unavailable or this connection is no longer valid." } });
+  return reply.code(502).send({ error: { code: "native_upstream_failed", message: "Audiobookshelf is unavailable or this connection is no longer valid." } });
 }

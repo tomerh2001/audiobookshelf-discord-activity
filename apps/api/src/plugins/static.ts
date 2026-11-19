@@ -10,7 +10,7 @@ const repoRootFromDist = path.resolve(currentDir, "../../../..");
 const nativeDist = path.join(repoRootFromDist, "native-client/dist");
 
 declare module "fastify" {
-  interface FastifyContextConfig { jellyfinStatic?: boolean; }
+  interface FastifyContextConfig { audiobookshelfStatic?: boolean; }
 }
 
 async function exists(directory: string): Promise<boolean> {
@@ -24,11 +24,11 @@ async function exists(directory: string): Promise<boolean> {
 
 export const staticFrontendPlugin: FastifyPluginAsync<{ nativeDirectory?: string }> = async (app, options) => {
   const nativeRoot = options.nativeDirectory ?? nativeDist;
-  app.addHook("onRoute", (route) => { route.config = { ...route.config, jellyfinStatic: true }; });
+  app.addHook("onRoute", (route) => { route.config = { ...route.config, audiobookshelfStatic: true }; });
   app.addHook("onSend", async (request, reply, payload) => {
     // Browser copies must revalidate through the ingress gate on every use.
     // Only packaged assets qualify; no HTML, API, media or credential response.
-    if (request.routeOptions.config.jellyfinStatic && ["GET", "HEAD"].includes(request.method)
+    if (request.routeOptions.config.audiobookshelfStatic && ["GET", "HEAD"].includes(request.method)
       && [200, 304].includes(reply.statusCode)
       && /\.(?:js|mjs|css|json|svg|png|jpe?g|webp|avif|ico|woff2?|ttf|wasm)$/i.test(request.url.split("?", 1)[0] ?? "")) {
       reply.header("Cache-Control", "private, no-cache, max-age=0, must-revalidate");
@@ -41,7 +41,7 @@ export const staticFrontendPlugin: FastifyPluginAsync<{ nativeDirectory?: string
     return payload;
   });
   if (!(await exists(nativeRoot))) {
-    if (app.envConfig.NODE_ENV === "production") throw new Error("The packaged Jellyfin Web client is missing. Build the complete release image.");
+    if (app.envConfig.NODE_ENV === "production") throw new Error("The packaged Audiobookshelf Web client is missing. Build the complete release image.");
     app.log.warn("native client build output not found; static serving disabled");
     return;
   }

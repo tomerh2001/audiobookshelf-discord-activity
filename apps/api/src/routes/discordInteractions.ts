@@ -39,7 +39,7 @@ export const discordInteractionRoutes: FastifyPluginAsync = async (app) => {
     if (interaction.type === 1) return { type: 1 };
     const userId = interaction.member?.user.id;
     if (!interaction.guild_id || !userId || !allowedDiscordActor(app.envConfig, userId, interaction.guild_id)) {
-      return ephemeral("This watch party is limited to the configured server and users.");
+      return ephemeral("This listening party is limited to the configured server and users.");
     }
     const now = Date.now();
     for (const [id, cached] of handled) if (cached.expiresAt < now) handled.delete(id);
@@ -47,7 +47,7 @@ export const discordInteractionRoutes: FastifyPluginAsync = async (app) => {
     if (cached) return cached.response;
     if (handled.size >= 10000) return reply.code(429).send({ error: "Too many interactions" });
     const launch = interaction.type === 2 && (interaction.data?.type === 4
-      || ["watch", "Watch Jellyfin"].includes(interaction.data?.name ?? ""));
+      || ["listen", "Listen to Audiobookshelf"].includes(interaction.data?.name ?? ""));
     if (launch) {
       // The user invoked an entry point, slash command or context menu in this
       // channel. Launch only: never create a public invitation/follow-up here.
@@ -55,9 +55,9 @@ export const discordInteractionRoutes: FastifyPluginAsync = async (app) => {
       handled.set(interaction.id, { expiresAt: now + 300_000, response });
       return response;
     }
-    const control = interaction.type === 2 && interaction.data?.name === "jellyfin";
-    const select = interaction.type === 3 && interaction.data?.custom_id?.startsWith("jellyfin:select:");
-    if ((!control && !select) || !interaction.token) return ephemeral("Unknown command. Use /watch or /jellyfin.");
+    const control = interaction.type === 2 && interaction.data?.name === "audiobookshelf";
+    const select = interaction.type === 3 && interaction.data?.custom_id?.startsWith("audiobookshelf:select:");
+    if ((!control && !select) || !interaction.token) return ephemeral("Unknown command. Use /listen or /audiobookshelf.");
     const response = { type: 5, data: { flags: 64 } };
     handled.set(interaction.id, { expiresAt: now + 300_000, response });
     void runControl(app, interaction, userId)
@@ -77,9 +77,8 @@ export const discordInteractionRoutes: FastifyPluginAsync = async (app) => {
 class CommandError extends Error {}
 
 const mediaSchema = z.object({
-  Id: z.string().regex(/^[a-f0-9-]{32,36}$/i), Name: z.string().min(1),
-  Type: z.enum(["Movie", "Episode"]), SeriesName: z.string().optional(),
-  ParentIndexNumber: z.number().optional(), IndexNumber: z.number().optional(), ProductionYear: z.number().optional()
+  id: z.string().regex(/^[a-zA-Z0-9_-]{1,64}$/),
+  media: z.object({ metadata: z.object({ title: z.string().min(1), authorName: z.string().optional() }) })
 });
 
 export async function runControl(app: FastifyInstance, interaction: Interaction, userId: string): Promise<Message> {
@@ -88,15 +87,15 @@ export async function runControl(app: FastifyInstance, interaction: Interaction,
   const voice = await fetch(`https://discord.com/api/v10/guilds/${encodeURIComponent(guildId)}/voice-states/${encodeURIComponent(userId)}`, {
     headers: { Authorization: `Bot ${env.DISCORD_BOT_TOKEN}` }, signal: AbortSignal.timeout(10_000)
   });
-  if (!voice.ok) throw new CommandError("Join a voice channel and open /watch first.");
+  if (!voice.ok) throw new CommandError("Join a voice channel and open /listen first.");
   const state = z.object({ channel_id: z.string().nullable() }).parse(await voice.json());
   if (!state.channel_id) throw new CommandError("Join a voice channel first.");
   const parties = getNativePartyService(app);
   const party = parties.getPartyForChannel(guildId, state.channel_id);
-  if (!party) throw new CommandError("Open /watch in your voice channel and connect to Jellyfin first.");
+  if (!party) throw new CommandError("Open /listen in your voice channel and connect to Audiobookshelf first.");
   await verifyDiscordActivityContext(env, party.context, userId);
   const viewer = parties.getViewerForDiscordUser(party.id, userId);
-  if (!viewer) throw new CommandError("Join the Activity and connect its Jellyfin player first.");
+  if (!viewer) throw new CommandError("Join the Activity and connect its Audiobookshelf player first.");
   const subcommand = interaction.data?.options?.[0];
   const action = interaction.type === 3 ? "select" : subcommand?.name;
   if (action === "now") {
@@ -104,38 +103,38 @@ export async function runControl(app: FastifyInstance, interaction: Interaction,
       .parse(await parties.command(viewer, "now"));
     return { content: current.title
       ? `${current.title}: ${current.isPaused ? "paused" : "playing"} at ${Math.floor(current.positionSeconds)} seconds.`
-      : "No video is playing yet. Pick something in Jellyfin." };
+      : "No audiobook is playing yet. Pick something in Audiobookshelf." };
   }
   if (action === "select") {
-    if (interaction.data?.custom_id !== `jellyfin:select:${party.id}`) {
-      throw new CommandError("That selection belongs to an earlier watch party. Search again with /jellyfin play.");
+    if (interaction.data?.custom_id !== `audiobookshelf:select:${party.id}`) {
+      throw new CommandError("That selection belongs to an earlier listening party. Search again with /audiobookshelf play.");
     }
     const itemId = interaction.data.values?.[0];
-    if (!itemId || !/^[a-f0-9-]{32,36}$/i.test(itemId)) throw new CommandError("Invalid selection. Search again with /jellyfin play.");
+    if (!itemId || !/^[a-zA-Z0-9_-]{1,64}$/.test(itemId)) throw new CommandError("Invalid selection. Search again with /audiobookshelf play.");
     await parties.command(viewer, "select", { itemIds: [itemId] });
-    return { content: "Selected for everyone. Jellyfin SyncPlay is preparing playback." };
+    return { content: "Selected for everyone. The listening party is preparing playback." };
   }
   if (action === "play") {
     const query = subcommand?.options?.find((option) => option.name === "query")?.value;
-    if (typeof query !== "string" || !query.trim() || query.length > 200) throw new CommandError("Enter a movie or episode title.");
-    const result = z.object({ Items: z.array(z.unknown()) }).parse(await parties.command(viewer, "search", { query }));
-    const items = result.Items.flatMap((item) => { const parsed = mediaSchema.safeParse(item); return parsed.success ? [parsed.data] : []; }).slice(0,25);
-    if (!items.length) return { content: "No matching movies or episodes. Try another title or browse Jellyfin in the Activity." };
+    if (typeof query !== "string" || !query.trim() || query.length > 200) throw new CommandError("Enter a audiobook title.");
+    const result = z.object({ items: z.array(z.unknown()) }).parse(await parties.command(viewer, "search", { query }));
+    const items = result.items.flatMap((item) => { const parsed = mediaSchema.safeParse(item); return parsed.success ? [parsed.data] : []; }).slice(0,25);
+    if (!items.length) return { content: "No matching audiobooks. Try another title or browse Audiobookshelf in the Activity." };
     if (items.length === 1) {
-      await parties.command(viewer, "select", { itemIds: [items[0]!.Id] });
-      return { content: `Selected ${items[0]!.Name} for everyone.` };
+      await parties.command(viewer, "select", { itemIds: [items[0]!.id] });
+      return { content: `Selected ${items[0]!.media.metadata.title} for everyone.` };
     }
-    return { content: "Choose what to watch:", components: [{ type: 1, components: [{
-      type: 3, custom_id: `jellyfin:select:${party.id}`, placeholder: "Select a movie or episode", options: items.map((item) => ({
-        label: `${item.SeriesName ? `${item.SeriesName} · S${item.ParentIndexNumber ?? "?"}E${item.IndexNumber ?? "?"} · ` : ""}${item.Name}`.slice(0,100),
-        value: item.Id, description: `${item.Type}${item.ProductionYear ? ` · ${item.ProductionYear}` : ""}`
+    return { content: "Choose an audiobook:", components: [{ type: 1, components: [{
+      type: 3, custom_id: `audiobookshelf:select:${party.id}`, placeholder: "Select an audiobook", options: items.map((item) => ({
+        label: item.media.metadata.title.slice(0, 100), value: item.id,
+        description: (item.media.metadata.authorName || "Audiobook").slice(0, 100)
       }))
     }] }] };
   }
   if (action === "seek") {
     const seconds = subcommand?.options?.find((option) => option.name === "seconds")?.value;
-    if (typeof seconds !== "number" || !Number.isFinite(seconds) || seconds < 0 || seconds > 86400) {
-      throw new CommandError("Choose a position between 0 and 86400 seconds.");
+    if (typeof seconds !== "number" || !Number.isFinite(seconds) || seconds < 0 || seconds > 31536000) {
+      throw new CommandError("Choose a position between 0 and 31536000 seconds.");
     }
     await parties.command(viewer, "seek", { seconds });
     return { content: `Seeking the party to ${Math.floor(seconds)} seconds.` };

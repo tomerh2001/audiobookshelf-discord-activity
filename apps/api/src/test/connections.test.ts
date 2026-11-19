@@ -7,8 +7,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { loadEnv, type AppEnv } from "../env.js";
 import { connectionRoutes } from "../routes/connections.js";
 import { createAppSession } from "../services/appSession.js";
-import { assertConnectionCurrent, connectCommunity, connectWithPassword, disconnectConnection, JellyfinConnectionStore,
-  onConnectionsRevoked, QuickConnectManager, resolveConnection, type ConnectionDto } from "../services/jellyfinConnections.js";
+import { assertConnectionCurrent, connectCommunity, connectWithPassword, disconnectConnection, AudiobookshelfConnectionStore,
+  onConnectionsRevoked, resolveConnection, type ConnectionDto } from "../services/audiobookshelfConnections.js";
 import { sessionStore } from "../services/sessionStore.js";
 
 const cleanups: (() => void | Promise<void>)[] = [];
@@ -17,9 +17,9 @@ afterEach(async () => {
   for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
 });
 
-describe("saved Jellyfin connections", () => {
-  it("blocks revoked accounts from personal and shared credential access before contacting Jellyfin", async () => {
-    const f = await fixture({ JELLYFIN_AUTH_MODE: "shared", JELLYFIN_SHARED_USERNAME: "community", JELLYFIN_SHARED_PASSWORD: "private-community-password", DISCORD_ALLOWED_GUILD_IDS: "guild-one" });
+describe("saved Audiobookshelf connections", () => {
+  it("blocks revoked accounts from personal and shared credential access before contacting Audiobookshelf", async () => {
+    const f = await fixture({ AUDIOBOOKSHELF_AUTH_MODE: "shared", AUDIOBOOKSHELF_SHARED_USERNAME: "community", AUDIOBOOKSHELF_SHARED_PASSWORD: "private-community-password", DISCORD_ALLOWED_GUILD_IDS: "guild-one" });
     const user = await actor(f.env, "revoked-user", "guild-one");
     f.env.DISCORD_DENIED_USER_IDS = "revoked-user";
     await expect(connectCommunity(f.env, user.session)).rejects.toThrow("discord_actor_forbidden");
@@ -33,8 +33,8 @@ describe("saved Jellyfin connections", () => {
     const f = await fixture();
     for (const [method, url] of [["GET", "/api/connections"], ["POST", "/api/connections"],
       ["POST", "/api/connections/community"], ["PUT", "/api/connections/preference"],
-      ["DELETE", "/api/connections/unknown"], ["POST", "/api/connections/quick-connect"],
-      ["POST", "/api/connections/quick-connect/unknown/poll"]] as const) {
+      ["DELETE", "/api/connections/unknown"], ["POST", "/api/connections/oidc"],
+      ["POST", "/api/connections/oidc/unknown/poll"]] as const) {
       expect((await f.app.inject({ method, url })).statusCode).toBe(401);
     }
     expect(f.requests).toHaveLength(0);
@@ -43,20 +43,20 @@ describe("saved Jellyfin connections", () => {
   it("validates public server identity before sending a password and sanitizes upstream errors", async () => {
     const f = await fixture();
     const user = await actor(f.env);
-    f.state.publicInfo = { unexpected: "not Jellyfin" };
+    f.state.publicInfo = { unexpected: "not Audiobookshelf" };
     const invalid = await f.app.inject({ method: "POST", url: "/api/connections", headers: user.headers,
       payload: { serverUrl: f.url, username: "demo", password: "private-password" } });
     expect(invalid.statusCode).toBe(502);
-    expect(f.requests.map((request) => request.path)).toEqual(["/System/Info/Public"]);
+    expect(f.requests.map((request) => request.path)).toEqual(["/status"]);
     expect(f.requests[0]?.headers.authorization).toBeUndefined();
     expect(invalid.body).not.toContain("private-password");
-    f.state.publicInfo = { Id: "server-one", ServerName: "Fixture Library", Version: "10.11.0" };
+    f.state.publicInfo = { app: "audiobookshelf", isInit: true, serverVersion: "2.38.0", authMethods: ["local", "openid"] };
     f.state.authStatus = 401;
     const rejected = await f.app.inject({ method: "POST", url: "/api/connections", headers: user.headers,
       payload: { serverUrl: f.url, username: "demo", password: "private-password" } });
     expect(rejected.statusCode).toBe(401);
     expect(rejected.body).not.toContain("upstream-debug-private-password");
-    expect(new JellyfinConnectionStore(f.env).list(user.session.discordUserId)).toEqual([]);
+    expect(new AudiobookshelfConnectionStore(f.env).list(user.session.discordUserId)).toEqual([]);
   });
 
   it("preserves password whitespace, encrypts only the token, and restores it for the same Discord account", async () => {
@@ -66,13 +66,14 @@ describe("saved Jellyfin connections", () => {
       payload: { serverUrl: `${f.url}/`, username: " demo ", password: "  fixture password  " } });
     expect(result.statusCode).toBe(201);
     const connection = result.json<{ connection: ConnectionDto }>().connection;
-    expect(connection).toMatchObject({ serverUrl: f.url, serverId: "server-one", jellyfinUsername: "demo", kind: "personal" });
-    const login = f.requests.find((request) => request.path === "/Users/AuthenticateByName")!;
-    expect(login.body).toEqual({ Username: "demo", Pw: "  fixture password  " });
-    expect(login.headers.authorization).toMatch(/^MediaBrowser .*DeviceId="jellyfin-watch-login-[^"]+"/);
+    expect(connection).toMatchObject({ serverUrl: f.url, audiobookshelfUsername: "demo", kind: "personal" });
+    const login = f.requests.find((request) => request.path === "/login")!;
+    expect(login.body).toEqual({ username: "demo", password: "  fixture password  " });
+    expect(login.headers.authorization).toBeUndefined();
+    expect(login.headers["x-return-tokens"]).toBe("true");
     expect(login.headers["x-emby-authorization"]).toBeUndefined();
     expect(result.body).not.toMatch(/fixture-access-token|encryptedAccessToken|loginDeviceId|fixture password/);
-    const filename = path.join(f.dataDir, "jellyfin-connections.sqlite");
+    const filename = path.join(f.dataDir, "audiobookshelf-connections.sqlite");
     const stored = await readFile(filename);
     expect(stored.includes(Buffer.from("fixture-access-token"))).toBe(false);
     expect(stored.includes(Buffer.from("fixture password"))).toBe(false);
@@ -89,8 +90,8 @@ describe("saved Jellyfin connections", () => {
   it("accepts the public alias while keeping saved account and preference identity canonical", async () => {
     // .invalid cannot be contacted: every successful request must use the
     // approved loopback fixture, without ever sending credentials to the alias.
-    const publicUrl = "https://media.invalid/jellyfin";
-    const f = await fixture({ JELLYFIN_PUBLIC_SERVER_URL: publicUrl, JELLYFIN_ALLOW_CUSTOM_SERVERS: "false" });
+    const publicUrl = "https://media.invalid/audiobookshelf";
+    const f = await fixture({ AUDIOBOOKSHELF_PUBLIC_SERVER_URL: publicUrl, AUDIOBOOKSHELF_ALLOW_CUSTOM_SERVERS: "false" });
     const alice = await actor(f.env, "alice", "guild-one");
     const before = await f.app.inject({ method: "GET", url: "/api/connections", headers: alice.headers });
     expect(before.json()).toMatchObject({ connections: [], defaultServerUrl: publicUrl, canonicalDefaultServerUrl: f.url });
@@ -100,7 +101,7 @@ describe("saved Jellyfin connections", () => {
       payload: { serverUrl: `${publicUrl}/`, username: "alice", password: "fixture" } });
     expect(result.statusCode).toBe(201);
     expect(result.json()).toMatchObject({ connection: { id: original.id, serverUrl: f.url } });
-    const store = new JellyfinConnectionStore(f.env);
+    const store = new AudiobookshelfConnectionStore(f.env);
     expect(store.list("alice", "guild-one")).toHaveLength(1);
     expect(store.preferred("alice", "guild-one")).toBe(original.id);
     expect((await resolveConnection(f.env, "alice", original.id, "guild-one")).target.serverUrl).toBe(f.url);
@@ -113,7 +114,7 @@ describe("saved Jellyfin connections", () => {
     const alice = await actor(f.env, "alice", "guild-one");
     const bob = await actor(f.env, "bob", "guild-one");
     const connection = await connectWithPassword(f.env, alice.session, { serverUrl: f.url, username: "alice", password: "fixture" });
-    const store = new JellyfinConnectionStore(f.env);
+    const store = new AudiobookshelfConnectionStore(f.env);
     expect(store.list("bob")).toEqual([]);
     expect(store.preferred("alice", "guild-two")).toBeNull();
     await expect(resolveConnection(f.env, "bob", connection.id)).rejects.toMatchObject({ statusCode: 404 });
@@ -132,7 +133,7 @@ describe("saved Jellyfin connections", () => {
     const removed = await f.app.inject({ method: "DELETE", url: `/api/connections/${connection.id}`, headers: alice.headers });
     expect(removed.json()).toEqual({ ok: true, upstreamRevoked: true });
     expect(revoked).toHaveBeenCalledExactlyOnceWith({ connectionId: connection.id, discordUserId: "alice" });
-    expect(f.requests.find((request) => request.path === "/Sessions/Logout")?.headers.authorization).toContain('Token="fixture-access-token-1"');
+    expect(f.requests.find((request) => request.path === "/logout")?.headers["x-refresh-token"]).toBe("fixture-refresh-token-1");
     expect(store.preferred("alice", "guild-one")).toBeNull();
     expect(store.preferred("alice", "guild-two")).toBeNull();
     await expect(resolveConnection(f.env, "alice", connection.id)).rejects.toMatchObject({ statusCode: 404 });
@@ -148,31 +149,67 @@ describe("saved Jellyfin connections", () => {
     const second = await connectWithPassword(f.env, alice.session, { serverUrl: f.url, username: "new-user", password: "fixture" });
     expect(second.id).toBe(first.id);
     expect(second.createdAt).toBe(first.createdAt);
-    expect(second.jellyfinUsername).toBe("new-user");
-    expect(new JellyfinConnectionStore(f.env).list("alice")).toHaveLength(1);
+    expect(second.audiobookshelfUsername).toBe("new-user");
+    expect(new AudiobookshelfConnectionStore(f.env).list("alice")).toHaveLength(1);
     expect(revoked).toHaveBeenCalledExactlyOnceWith({ connectionId: first.id, discordUserId: "alice" });
     expect(() => assertConnectionCurrent(f.env, "alice", oldCredential)).toThrow();
     expect((await resolveConnection(f.env, "alice", second.id)).accessToken).toBe("fixture-access-token-2");
     expect(f.state.logoutCount).toBe(1);
-    expect(f.requests.find((request) => request.path === "/Sessions/Logout")?.headers.authorization).toContain('Token="fixture-access-token-1"');
+    expect(f.requests.find((request) => request.path === "/logout")?.headers["x-refresh-token"]).toBe("fixture-refresh-token-1");
   });
 
-  it("refuses saved-token use after a server ID change while still allowing local disconnection", async () => {
+  it("refuses saved-token use for a different account and still permits local disconnect", async () => {
     const f = await fixture();
     const alice = await actor(f.env, "alice");
     const connection = await connectWithPassword(f.env, alice.session, { serverUrl: f.url, username: "alice", password: "fixture" });
-    f.state.publicInfo = { Id: "different-server", ServerName: "Replaced server", Version: "10.11.0" };
-    const before = f.requests.length;
-    await expect(resolveConnection(f.env, "alice", connection.id)).rejects.toMatchObject({ code: "jellyfin_identity_changed" });
-    expect(await disconnectConnection(f.env, "alice", connection.id)).toEqual({ ok: true, upstreamRevoked: false });
-    expect(f.requests.slice(before).every((request) => !request.headers.authorization && !request.headers["x-emby-authorization"])).toBe(true);
-    expect(f.state.logoutCount).toBe(0);
-    expect(new JellyfinConnectionStore(f.env).list("alice")).toEqual([]);
+    f.state.authorizeUserId = "different-user";
+    await expect(resolveConnection(f.env, "alice", connection.id)).rejects.toMatchObject({ code: "audiobookshelf_identity_changed" });
+    expect(await disconnectConnection(f.env, "alice", connection.id)).toEqual({ ok: true, upstreamRevoked: true });
+    expect(new AudiobookshelfConnectionStore(f.env).list("alice")).toEqual([]);
+  });
+
+  it("rotates expired credentials once for concurrent resolves without revoking playback", async () => {
+    const f = await fixture();
+    const alice = await actor(f.env, "alice");
+    const connection = await connectWithPassword(f.env, alice.session, { serverUrl: f.url, username: "alice", password: "fixture" });
+    const oldCredential = await resolveConnection(f.env, "alice", connection.id);
+    const revoked = vi.fn(); cleanups.push(onConnectionsRevoked(revoked));
+    f.state.expiredToken = oldCredential.accessToken;
+    const [first, second] = await Promise.all([resolveConnection(f.env, "alice", connection.id), resolveConnection(f.env, "alice", connection.id)]);
+    expect(first.accessToken).toBe("fixture-refreshed-access-token");
+    expect(second.accessToken).toBe(first.accessToken);
+    expect(f.state.refreshCount).toBe(1);
+    expect(revoked).not.toHaveBeenCalled();
+    expect(() => assertConnectionCurrent(f.env, "alice", oldCredential)).not.toThrow();
+    await disconnectConnection(f.env, "alice", connection.id);
+    expect(f.requests.find((request) => request.path === "/logout")?.headers["x-refresh-token"]).toBe("fixture-rotated-refresh-token");
+  });
+
+  it("refreshes a JWT before expiry so the player cache cannot outlive it", async () => {
+    const f = await fixture();
+    f.state.accessToken = `header.${Buffer.from(JSON.stringify({ exp: Math.floor(Date.now() / 1000) + 20 })).toString("base64url")}.signature`;
+    const alice = await actor(f.env, "alice");
+    const connection = await connectWithPassword(f.env, alice.session, { serverUrl: f.url, username: "alice", password: "fixture" });
+    const resolved = await resolveConnection(f.env, "alice", connection.id);
+    expect(resolved.accessToken).toBe("fixture-refreshed-access-token");
+    expect(f.state.refreshCount).toBe(1);
+    expect(f.requests.find((request) => request.path === "/api/authorize")?.headers.authorization).toBe("Bearer fixture-refreshed-access-token");
+  });
+
+  it("allows explicit public community access while preserving each user's ownership and guild scope", async () => {
+    const f = await fixture({ DISCORD_ACCESS_MODE: "public", AUDIOBOOKSHELF_AUTH_MODE: "shared", AUDIOBOOKSHELF_COMMUNITY_ACCESS: "public",
+      AUDIOBOOKSHELF_SHARED_USERNAME: "community", AUDIOBOOKSHELF_SHARED_PASSWORD: "fixture" });
+    const alice = await actor(f.env, "alice");
+    const connection = await connectCommunity(f.env, alice.session);
+    expect(new AudiobookshelfConnectionStore(f.env).list("alice")).toEqual([connection]);
+    await expect(resolveConnection(f.env, "alice", connection.id)).resolves.toMatchObject({ kind: "community" });
+    await expect(resolveConnection(f.env, "bob", connection.id)).rejects.toMatchObject({ statusCode: 404 });
+    await expect(resolveConnection(f.env, "alice", connection.id, "other-guild")).rejects.toMatchObject({ statusCode: 404 });
   });
 
   it("requires explicit community opt-in and binds community tokens to the approved guild", async () => {
-    const f = await fixture({ JELLYFIN_AUTH_MODE: "shared", JELLYFIN_SHARED_USERNAME: "community",
-      JELLYFIN_SHARED_PASSWORD: "community-fixture", DISCORD_ALLOWED_GUILD_IDS: "guild-one,guild-two" });
+    const f = await fixture({ AUDIOBOOKSHELF_AUTH_MODE: "shared", AUDIOBOOKSHELF_SHARED_USERNAME: "community",
+      AUDIOBOOKSHELF_SHARED_PASSWORD: "community-fixture", DISCORD_ALLOWED_GUILD_IDS: "guild-one,guild-two" });
     const alice = await actor(f.env, "alice", "guild-one");
     const initial = await f.app.inject({ method: "GET", url: "/api/connections", headers: alice.headers });
     expect(initial.json()).toMatchObject({ connections: [], communityAvailable: true });
@@ -183,7 +220,7 @@ describe("saved Jellyfin connections", () => {
     expect(community.kind).toBe("community");
     await expect(resolveConnection(f.env, "alice", community.id, "guild-one")).resolves.toMatchObject({ kind: "community" });
     await expect(resolveConnection(f.env, "alice", community.id, "guild-two")).rejects.toMatchObject({ statusCode: 404 });
-    const store = new JellyfinConnectionStore(f.env);
+    const store = new AudiobookshelfConnectionStore(f.env);
     expect(store.list("alice", "guild-two")).toEqual([]);
     expect(() => store.setPreferred("alice", "guild-two", community.id)).toThrow();
     const secondGuild = await actor(f.env, "alice", "guild-two");
@@ -192,8 +229,8 @@ describe("saved Jellyfin connections", () => {
     expect(store.list("alice", "guild-one").map((connection) => connection.id)).toEqual([community.id]);
     const otherGuild = await actor(f.env, "alice", "guild-outside");
     await expect(connectCommunity(f.env, otherGuild.session)).rejects.toMatchObject({ statusCode: 403 });
-    expect(f.requests.filter((request) => request.path === "/Users/AuthenticateByName").every((request) =>
-      (request.body as { Username: string }).Username === "community")).toBe(true);
+    expect(f.requests.filter((request) => request.path === "/login").every((request) =>
+      (request.body as { username: string }).username === "community")).toBe(true);
   });
 
   it("does not save a new token if the app session is revoked during authentication", async () => {
@@ -202,86 +239,7 @@ describe("saved Jellyfin connections", () => {
     f.state.beforeAuthResponse = () => sessionStore.deleteSession(alice.session.id);
     await expect(connectWithPassword(f.env, alice.session, { serverUrl: f.url, username: "alice", password: "fixture" }))
       .rejects.toMatchObject({ code: "invalid_app_session" });
-    expect(new JellyfinConnectionStore(f.env).list("alice")).toEqual([]);
-    expect(f.state.logoutCount).toBe(1);
-  });
-});
-
-describe("Jellyfin Quick Connect", () => {
-  it("uses the same canonical destination when Quick Connect starts with the public alias", async () => {
-    const publicUrl = "https://media.invalid/jellyfin";
-    const f = await fixture({ JELLYFIN_PUBLIC_SERVER_URL: publicUrl });
-    const alice = await actor(f.env, "alice", "guild-one");
-    const manager = new QuickConnectManager(f.env); cleanups.push(() => manager.dispose());
-    const pending = await manager.start(alice.session, publicUrl);
-    f.state.quickAuthorized = true;
-    const result = await manager.poll(alice.session, pending.id);
-    expect(result).toMatchObject({ status: "connected", connection: { serverUrl: f.url } });
-    expect(f.requests.every((request) => request.headers.host === new URL(f.url).host)).toBe(true);
-    expect(f.state.quickAuthCount).toBe(1);
-  });
-
-  it("returns only the code, binds polling to the exact app session, and exchanges the secret once", async () => {
-    const f = await fixture();
-    const alice = await actor(f.env, "alice", "guild-one");
-    const otherSession = await actor(f.env, "alice", "guild-one");
-    const start = await f.app.inject({ method: "POST", url: "/api/connections/quick-connect", headers: alice.headers,
-      payload: { serverUrl: f.url } });
-    expect(start.statusCode).toBe(201);
-    expect(start.body).not.toContain("fixture-quick-connect-secret");
-    const pending = start.json<{ id: string; code: string; expiresAt: string }>();
-    expect(pending.code).toBe("123456");
-    const pollUrl = `/api/connections/quick-connect/${pending.id}/poll`;
-    const denied = await f.app.inject({ method: "POST", url: pollUrl, headers: otherSession.headers });
-    expect(denied.statusCode).toBe(404);
-    expect(f.state.pollCount).toBe(0);
-    const waiting = await f.app.inject({ method: "POST", url: pollUrl, headers: alice.headers });
-    expect(waiting.json()).toEqual({ status: "pending" });
-    f.state.quickAuthorized = true;
-    vi.spyOn(Date, "now").mockReturnValue(Date.now() + 2100);
-    const results = await Promise.all([1, 2].map(() => f.app.inject({ method: "POST", url: pollUrl, headers: alice.headers })));
-    expect(results.every((result) => result.statusCode === 200)).toBe(true);
-    const completed = results[0]!.json<{ status: string; connection: ConnectionDto }>();
-    expect(completed.status).toBe("connected");
-    expect(results[1]!.json()).toEqual(completed);
-    expect(f.state.quickAuthCount).toBe(1);
-    expect(results[0]!.body).not.toMatch(/fixture-quick-connect-secret|fixture-access-token/);
-    expect(new JellyfinConnectionStore(f.env).preferred("alice", "guild-one")).toBe(completed.connection.id);
-    expect(f.requests.find((request) => request.path === "/Users/AuthenticateWithQuickConnect")?.body)
-      .toEqual({ Secret: "fixture-quick-connect-secret" });
-    const quickRequests = f.requests.filter((request) => request.path.startsWith("/QuickConnect/")
-      || request.path === "/Users/AuthenticateWithQuickConnect");
-    expect(quickRequests.map((request) => [request.method, request.path])).toEqual([
-      ["POST", "/QuickConnect/Initiate"], ["GET", "/QuickConnect/Connect"],
-      ["GET", "/QuickConnect/Connect"], ["POST", "/Users/AuthenticateWithQuickConnect"]
-    ]);
-    const authorization = quickRequests[0]!.headers.authorization;
-    expect(authorization).toMatch(/^MediaBrowser .*DeviceId="jellyfin-watch-login-[^"]+"/);
-    expect(quickRequests.every((request) => request.headers.authorization === authorization
-      && request.headers["x-emby-authorization"] === undefined)).toBe(true);
-  });
-
-  it("invalidates superseded and revoked requests without disclosing their state", async () => {
-    const f = await fixture();
-    const alice = await actor(f.env, "alice");
-    const manager = new QuickConnectManager(f.env); cleanups.push(() => manager.dispose());
-    const old = await manager.start(alice.session, f.url);
-    const current = await manager.start(alice.session, f.url);
-    await expect(manager.poll(alice.session, old.id)).rejects.toMatchObject({ statusCode: 404 });
-    sessionStore.deleteSession(alice.session.id);
-    await expect(manager.poll(alice.session, current.id)).rejects.toMatchObject({ statusCode: 404 });
-    expect(f.state.pollCount).toBe(0);
-  });
-
-  it("does not save an in-flight Quick Connect result after session revocation", async () => {
-    const f = await fixture();
-    const alice = await actor(f.env, "alice");
-    const manager = new QuickConnectManager(f.env); cleanups.push(() => manager.dispose());
-    const pending = await manager.start(alice.session, f.url);
-    f.state.quickAuthorized = true;
-    f.state.beforeAuthResponse = () => sessionStore.deleteSession(alice.session.id);
-    await expect(manager.poll(alice.session, pending.id)).rejects.toMatchObject({ code: "invalid_app_session" });
-    expect(new JellyfinConnectionStore(f.env).list("alice")).toEqual([]);
+    expect(new AudiobookshelfConnectionStore(f.env).list("alice")).toEqual([]);
     expect(f.state.logoutCount).toBe(1);
   });
 });
@@ -295,9 +253,10 @@ async function actor(env: AppEnv, userId = "alice", guildId?: string) {
 
 async function fixture(overrides: NodeJS.ProcessEnv = {}) {
   const requests: { method: string; path: string; headers: IncomingHttpHeaders; body: unknown }[] = [];
-  const state = { publicInfo: { Id: "server-one", ServerName: "Fixture Library", Version: "12.0.0" } as unknown,
-    authStatus: 200, authCount: 0, logoutCount: 0, pollCount: 0, quickAuthorized: false, quickAuthCount: 0,
+  const state = { publicInfo: { app: "audiobookshelf", isInit: true, serverVersion: "2.38.0", authMethods: ["local", "openid"] } as unknown,
+    authStatus: 200, authCount: 0, logoutCount: 0, refreshCount: 0, authorizeUserId: "", expiredToken: "", accessToken: "",
     beforeAuthResponse: undefined as (() => void) | undefined };
+  const users = new Map<string, string>();
   const server = createServer(async (request, response) => {
     const chunks: Buffer[] = [];
     for await (const chunk of request) chunks.push(Buffer.from(chunk as Uint8Array));
@@ -307,37 +266,37 @@ async function fixture(overrides: NodeJS.ProcessEnv = {}) {
     requests.push({ method: request.method!, path: url.pathname, headers: request.headers, body });
     response.setHeader("Content-Type", "application/json");
     const send = (value: unknown, status = 200) => { response.statusCode = status; response.end(JSON.stringify(value)); };
-    if (url.pathname === "/System/Info/Public") return send(state.publicInfo);
-    // Jellyfin 12 ignores X-Emby-Authorization when legacy auth is disabled.
-    // Login and Quick Connect still need the modern header's device metadata.
-    const authorization = request.headers.authorization ?? "";
-    if (!/^MediaBrowser /.test(authorization) || !/DeviceId="[^"]+"/.test(authorization)) {
-      return send({ error: "modern_authorization_required" }, 401);
-    }
-    if (url.pathname === "/QuickConnect/Initiate" && request.method !== "POST") return send({}, 405);
-    if (url.pathname === "/Users/AuthenticateByName" || url.pathname === "/Users/AuthenticateWithQuickConnect") {
+    if (url.pathname === "/status") return send(state.publicInfo);
+    if (url.pathname === "/login") {
+      if (request.headers["x-return-tokens"] !== "true") return send({}, 400);
       state.authCount++;
-      if (url.pathname.endsWith("AuthenticateWithQuickConnect")) state.quickAuthCount++;
       state.beforeAuthResponse?.();
       if (state.authStatus !== 200) return send({ debug: "upstream-debug-private-password" }, state.authStatus);
-      const name = (body as { Username?: string }).Username ?? "quick-user";
-      return send({ User: { Id: `user-${name}`, Name: name }, AccessToken: `fixture-access-token-${state.authCount}`, ServerId: "server-one" });
+      const username = (body as { username: string }).username;
+      const accessToken = state.accessToken || `fixture-access-token-${state.authCount}`;
+      users.set(accessToken, `user-${username}`);
+      return send({ user: { id: `user-${username}`, username, accessToken, refreshToken: `fixture-refresh-token-${state.authCount}` } });
     }
-    if (url.pathname === "/Sessions/Logout") { state.logoutCount++; response.writeHead(204); return response.end(); }
-    if (url.pathname === "/QuickConnect/Initiate") return send({ Secret: "fixture-quick-connect-secret", Code: "123456" });
-    if (url.pathname === "/QuickConnect/Connect") {
-      state.pollCount++;
-      if (url.searchParams.get("Secret") !== "fixture-quick-connect-secret") return send({}, 404);
-      return send({ Authenticated: state.quickAuthorized });
+    if (url.pathname === "/api/authorize") {
+      const token = request.headers.authorization?.replace(/^Bearer /, "") ?? "";
+      if (token === state.expiredToken || !users.has(token)) return send({}, 401);
+      return send({ user: { id: state.authorizeUserId || users.get(token) } });
     }
+    if (url.pathname === "/auth/refresh") {
+      state.refreshCount++;
+      if (request.headers["x-refresh-token"] !== "fixture-refresh-token-1") return send({}, 401);
+      users.set("fixture-refreshed-access-token", "user-alice");
+      return send({ user: { id: "user-alice", username: "alice", accessToken: "fixture-refreshed-access-token", refreshToken: "fixture-rotated-refresh-token" } });
+    }
+    if (url.pathname === "/logout") { state.logoutCount++; return send({ redirect_url: null }); }
     send({}, 404);
   });
   const port = await listen(server);
   const url = `http://127.0.0.1:${port}`;
-  const dataDir = await mkdtemp(path.join(tmpdir(), "jellyfin-connections-test-"));
+  const dataDir = await mkdtemp(path.join(tmpdir(), "audiobookshelf-connections-test-"));
   cleanups.push(() => rm(dataDir, { recursive: true, force: true }));
   const env = loadEnv({ NODE_ENV: "test", DEV_AUTH_MOCK: "true", TOKEN_ENCRYPTION_KEY: Buffer.alloc(32, 13).toString("base64"),
-    DATABASE_URL: `file:${path.join(dataDir, "app.db")}`, JELLYFIN_DEFAULT_SERVER_URL: url, ...overrides });
+    DATABASE_URL: `file:${path.join(dataDir, "app.db")}`, AUDIOBOOKSHELF_DEFAULT_SERVER_URL: url, ...overrides });
   const app: FastifyInstance = Fastify({ logger: false });
   app.decorate("envConfig", env);
   app.decorateRequest("appSession");

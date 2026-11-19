@@ -1,376 +1,234 @@
-import { PLAYBACK_BLOCKED_EVENT } from './playbackPermission.js';
+import { randomId } from './randomId.js';
+import { createActivityPlaybackClient } from './activityPlaybackClient.js';
+const TICKS = 10_000_000;
+const seconds = ticks => Math.max(0, ticks / TICKS);
+const identity = entry => entry ? `${entry.id}:${entry.itemId}:${entry.episodeId || ''}` : '';
 
-/** Keep Jellyfin's player, queue and reporting, with Activity-owned timing. */
-export function createNativePlaybackAdapter({ playbackManager: manager, events, apiClient, baseUrl, createClient, onError, host = window, now = () => Date.now() }) {
-    const original = new Map();
-    const installed = new Map();
-    const items = new Map();
-    const playOptions = new Map();
-    let closed = false;
-    let generation = 0;
-    let preparing;
-    let desired;
-    let activeEntry;
-    let endedEntry;
-    let player;
-    let buffered = false;
-    let playbackBlocked = false;
-    let readySince;
-    let failedPreparation;
-    let lastResume;
-    let lastCorrection = 0;
-    let automaticRate;
-    let baseRate = 1;
-    let ignoreSeek;
-    let nativeGestureUntil = 0;
-    let lastError;
-    let preparationSequence = 0;
-    const serverId = apiClient.serverId();
-    const getPlayer = () => manager.getCurrentPlayer();
-    const position = () => {
-        const current = getPlayer();
-        return current ? Math.max(0, manager.getCurrentTicks(current) || 0) : 0;
-    };
-    const invoke = (name, ...args) => original.get(name).apply(manager, args);
-    const report = error => {
-        const message = typeof error === 'string' ? error : error instanceof Error ? error.message : 'Could not synchronize playback.';
-        if (!closed && !(lastError?.message === message && now() - lastError.at < 1000)) {
-            lastError = { message, at: now() }; onError(message);
-        }
-    };
-    const submit = (operation, options) => {
-        if (closed) return Promise.resolve();
-        try { return Promise.resolve(client.submit(operation, options)).catch(report); }
-        catch (error) { report(error); return Promise.resolve(); }
-    };
-    const snapshot = () => client.getSnapshot();
-    const currentEntry = state => state?.queue?.[state.index];
-    const entryKey = entry => entry && JSON.stringify([entry.id, entry.itemId]);
-    const cached = entry => items.get(entry.id)?.Id === entry.itemId;
-    const sameQueue = (left, right) => left.length === right.length && left.every((item, index) => item.PlaylistItemId === right[index].id && item.Id === right[index].itemId);
-
-    function resetRate() {
-        if (automaticRate != null && player?.setPlaybackRate && player.getPlaybackRate() === automaticRate) player.setPlaybackRate(baseRate);
-        automaticRate = undefined;
+/** Adapt the actual Audiobookshelf PlayerHandler and whole-book track timeline. */
+export function createNativePlayer({ component: ctx, socket, baseUrl, presence, onSnapshot = () => {}, onBlocked = () => {}, onError = () => {}, now = () => Date.now() }) {
+    const handler = ctx.playerHandler, store = ctx.$store;
+    let closed = false, generation = 0, loadingIdentity = '', selectedIdentity = '', snapshot, suppressQueue = false;
+    let pendingEffect, driftSeekAt = 0, stableSince = 0, sleeping = false, blocked = false, audio, played = false, buffering = false;
+    const metadata = new Map(), itemCache = new Map(), itemPending = new Map();
+    let queueHydration = 0;
+    const engine = createActivityPlaybackClient({ baseUrl, apiClient: socket, apply, onError });
+    const commit = (name, payload) => { suppressQueue = true; try { store.commit(name, payload); } finally { suppressQueue = false; } };
+    const submit = (value, options) => { const promise = engine.submit(value, options); void promise.catch(() => {}); return promise; };
+    function setBlocked(value) { blocked = value; onBlocked(value); }
+    function currentAudio() { return handler.player?.player; }
+    async function loadItem(id) {
+        if (itemCache.has(id)) return itemCache.get(id);
+        if (!itemPending.has(id)) itemPending.set(id, ctx.$axios.$get(`/api/items/${encodeURIComponent(id)}?expanded=1`).then(item => { if (!closed) itemCache.set(id, item); return item; }).finally(() => itemPending.delete(id)));
+        return itemPending.get(id);
     }
-
-    function seek(ticks) {
-        if (!getPlayer()) return;
-        lastCorrection = now();
-        readySince = buffered ? undefined : now();
-        ignoreSeek = { ticks, until: now() + 2000 };
-        invoke('seek', ticks);
+    function nativeMetadata(item, episodeId) {
+        const episode = episodeId && item.media?.episodes?.find(value => value.id === episodeId);
+        return { title: episode?.title || item.media?.metadata?.title || 'Audiobook', subtitle: episode ? item.media?.metadata?.title : item.media?.metadata?.authorName, caption: episode?.pubDate || '', duration: episode?.duration || item.media?.duration, coverPath: item.media?.coverPath };
     }
-
-    // Native ranges already include the stream's transcoding offset, in ticks.
-    // A seek into an unloaded segment can restart buffering on every recovery.
-    const hasBuffer = ticks => manager.getBufferedRanges?.().some(range => range.start <= ticks && range.end >= ticks + 20_000_000) ?? false;
-
-    function applyTimeline(state, { origin, type, resumed } = {}, force = false) {
-        const current = getPlayer();
-        if (!current || preparing || entryKey(currentEntry(state)) !== activeEntry) return;
-        const drift = state.positionTicks - position();
-        // Returning to a mobile Activity can emit visibility, pageshow and
-        // online together. Give its first catch-up time to load.
-        const recovery = resumed && (lastResume == null || now() - lastResume >= 3000);
-        if (recovery) lastResume = now();
-        if (type === 'seek' || type === 'select' || recovery || force || (state.paused && Math.abs(drift) > 1_000_000)) {
-            resetRate();
-            if (Math.abs(drift) > (recovery ? 2_500_000 : 100_000) || type === 'seek' || type === 'select') seek(state.positionTicks);
-        } else if (origin !== 'local' && !buffered && !state.paused && !manager.paused()) {
-            const milliseconds = drift / 10_000;
-            const stable = readySince != null && now() - readySince >= 3000;
-            if (stable && Math.abs(milliseconds) > 1500 && now() - lastCorrection > 3000 && hasBuffer(state.positionTicks)) {
-                resetRate(); lastCorrection = now(); seek(state.positionTicks);
-            } else if (stable && Math.abs(milliseconds) > 250 && hasBuffer(position()) && current.setPlaybackRate && current.getPlaybackRate) {
-                if (automaticRate == null || current.getPlaybackRate() !== automaticRate) baseRate = current.getPlaybackRate() || 1;
-                automaticRate = baseRate * (milliseconds > 0 ? 1.03 : 0.97);
-                current.setPlaybackRate(automaticRate);
-            } else if (!stable || !hasBuffer(position()) || Math.abs(milliseconds) <= 150) resetRate();
-        }
-        if (state.paused) { resetRate(); if (!manager.paused()) invoke('pause'); }
-        else if (!playbackBlocked && manager.paused()) invoke('unpause');
-    }
-
-    async function hydrate(queue) {
-        const missing = [...new Set(queue.filter(entry => !cached(entry)).map(entry => entry.itemId))];
-        if (missing.length) {
-            const result = await manager.getItemsForPlayback(serverId, { Ids: missing.join(',') });
-            const found = new Map(result.Items.map(item => [item.Id, item]));
-            for (const entry of queue) {
-                if (!cached(entry)) {
-                    const item = found.get(entry.itemId);
-                    if (!item) throw new Error('An item in this watch party is unavailable to your Jellyfin account.');
-                    items.set(entry.id, { ...item, PlaylistItemId: entry.id });
-                }
+    async function hydrateQueue(queue) {
+        const revision = ++queueHydration;
+        const missing = [...new Set(queue.filter(entry => !metadata.get(`${entry.itemId}:${entry.episodeId || ''}`)?.duration).map(entry => entry.itemId))];
+        let cursor = 0;
+        await Promise.all(Array.from({ length: Math.min(4, missing.length) }, async () => {
+            while (!closed && revision === queueHydration && cursor < missing.length) {
+                const id = missing[cursor++];
+                try { const item = await loadItem(id); if (closed || revision !== queueHydration) return; for (const entry of queue.filter(entry => entry.itemId === id)) metadata.set(`${id}:${entry.episodeId || ''}`, nativeMetadata(item, entry.episodeId)); } catch { /* Selected-item errors have actionable native feedback. */ }
             }
-        }
-        return queue.map(entry => items.get(entry.id));
+        }));
+        if (!closed && revision === queueHydration && snapshot) commit('setPlayerQueueItems', queueForNative(snapshot.queue));
     }
-
-    function updateQueue(state, preparedItems) {
-        const queue = manager._playQueueManager;
-        if (sameQueue(queue.getPlaylist(), state.queue)) return;
-        queue.setPlaylist(preparedItems);
-        applyRepeat(state);
-        queue.setPlaylistState(currentEntry(state)?.id);
-        if (getPlayer()) events.trigger(getPlayer(), 'playlistitemadd');
+    function queueForNative(queue) {
+        return queue.map(entry => ({ ...(metadata.get(`${entry.itemId}:${entry.episodeId || ''}`) || {}),
+            activityEntryId: entry.id, libraryItemId: entry.itemId, ...(entry.episodeId ? { episodeId: entry.episodeId } : {}) }));
     }
-
-    function applyRepeat(state) {
-        const mode = state.repeatMode || 'RepeatNone';
-        if (manager._playQueueManager.getRepeatMode() === mode) return;
-        if (getPlayer()) invoke('setRepeatMode', mode);
-        else manager._playQueueManager.setRepeatMode(mode);
-    }
-
-    function apply(state, metadata = {}) {
+    function apply(next, effect = {}) {
         if (closed) return;
-        desired = state;
-        const entry = currentEntry(state);
-        const identity = entryKey(entry);
-        applyRepeat(state);
+        snapshot = next; onSnapshot(next);
+        const entry = next.queue[next.index];
         if (!entry) {
-            generation++; preparationSequence++; preparing = undefined; activeEntry = undefined; endedEntry = undefined;
-            failedPreparation = undefined; playbackBlocked = false; readySince = undefined; lastResume = undefined;
-            resetRate();
-            if (getPlayer()) void Promise.resolve(invoke('stop')).then(() => { if (!closed && desired === state) applyRepeat(state); }).catch(report);
+            generation++; loadingIdentity = ''; selectedIdentity = ''; sleeping = false; setBlocked(false);
+            handler.closePlayer(); commit('setMediaPlaying', null); presence?.clear(); return;
+        }
+        commit('setPlayerQueueItems', queueForNative(next.queue));
+        void hydrateQueue(next.queue);
+        const key = identity(entry);
+        if (key !== selectedIdentity || handler.libraryItemId !== entry.itemId || handler.episodeId !== (entry.episodeId || null)) {
+            if (loadingIdentity !== key) void prepare(entry, next, key);
             return;
         }
-        if (preparing?.entry === identity) return;
-        if (failedPreparation?.entry !== identity || (metadata.origin === 'local' && metadata.type === 'select')) failedPreparation = undefined;
-        // Socket refreshes and resume events must obey the same retry budget.
-        if (failedPreparation?.entry === identity && (!failedPreparation.retryable || failedPreparation.attempts > 3 || now() < failedPreparation.after)) return;
-        if (activeEntry === identity && getPlayer()) {
-            if (!sameQueue(manager._playQueueManager.getPlaylist(), state.queue)) {
-                const current = generation;
-                if (state.queue.every(cached)) updateQueue(state, state.queue.map(value => items.get(value.id)));
-                else void hydrate(state.queue).then(values => {
-                    if (!closed && current === generation && desired === state) updateQueue(state, values);
-                }).catch(report);
-            }
-            applyTimeline(state, metadata);
-            return;
-        }
-        preparationSequence++;
-        const current = ++generation;
-        const attempt = { entry: identity };
-        preparing = attempt;
-        resetRate(); buffered = false; playbackBlocked = false; readySince = undefined; lastResume = undefined;
-        const isCurrent = () => !closed && current === generation && entryKey(currentEntry(desired)) === identity;
-        const failed = error => {
-            if (!isCurrent()) return;
-            preparing = undefined;
-            const attempts = (failedPreparation?.attempts || 0) + 1;
-            failedPreparation = { entry: identity, attempts, after: now() + 5000 * 2 ** (attempts - 1),
-                retryable: !['notallowederror', 'aborterror'].includes(String(error?.name || '').toLowerCase()) };
-            report(error);
-        };
-        const begin = values => {
-            if (!isCurrent()) return;
-            const latest = snapshot() || desired;
-            const options = { ...playOptions.get(entry.id), serverId, fullscreen: true,
-                startIndex: values.findIndex(item => item.PlaylistItemId === entry.id && item.Id === entry.itemId),
-                startPositionTicks: latest.positionTicks,
-                activityIsCurrent: isCurrent, activityRetainTracks: Boolean(activeEntry || endedEntry) };
-            return manager.activityPlayPrepared(values, options).then(() => {
-                if (!isCurrent()) return;
-                // Native cancellation must never look like a successful start:
-                // apply() would immediately prepare again without a retry bound.
-                if (!getPlayer()) throw new Error('Could not start playback on this device.');
-                activeEntry = identity; endedEntry = undefined;
-                preparing = undefined; failedPreparation = undefined;
-                if (!buffered && !manager.paused()) readySince = now();
-                apply(snapshot() || desired);
-                applyTimeline(snapshot() || desired, metadata, true);
-            });
-        };
-        // A local prepared queue reaches the native pipeline during the gesture,
-        // before any command acknowledgement or remote participant response.
-        if (state.queue.every(cached)) {
-            try { void Promise.resolve(begin(state.queue.map(value => items.get(value.id)))).catch(failed); }
-            catch (error) { failed(error); }
-        } else void hydrate(state.queue).then(begin).catch(failed);
+        if (loadingIdentity) return;
+        synchronize(next, effect);
     }
-
-    const client = createClient({ baseUrl, apiClient, apply, onError: report });
-    const replace = (name, callback) => {
-        original.set(name, manager[name]); installed.set(name, callback); manager[name] = callback;
-    };
-    const desiredPaused = () => snapshot()?.paused ?? manager.paused() ?? true;
-    const controlPosition = () => {
-        const state = snapshot();
-        const ticks = position();
-        // Pause/resume is not a seek. A stalled viewer must not rewind everyone
-        // to its stale frame, including while an earlier catch-up seek loads.
-        return state && (buffered || state.positionTicks - ticks > 15_000_000) ? state.positionTicks : ticks;
-    };
-    const resumeLocal = () => {
-        nativeGestureUntil = 0; playbackBlocked = false;
-        // Keep play() inside the user's gesture, without changing the party's
-        // timeline to the interrupted device's older position.
-        try { return Promise.resolve(invoke('unpause')).catch(report); }
-        catch (error) { report(error); return Promise.resolve(); }
-    };
-    const canResumeLocally = () => getPlayer() && !desiredPaused() && activeEntry === entryKey(currentEntry(snapshot()));
-    replace('pause', () => submit({ type: 'setPlayback', paused: true, positionTicks: controlPosition() }));
-    replace('unpause', () => canResumeLocally() ? resumeLocal() : submit({ type: 'setPlayback', paused: false, positionTicks: controlPosition() }));
-    replace('playPause', () => canResumeLocally() && manager.paused() ? resumeLocal()
-        : submit({ type: 'setPlayback', paused: !desiredPaused(), positionTicks: controlPosition() }));
-    replace('seek', ticks => submit({ type: 'seek', positionTicks: Math.max(0, Math.round(ticks)), paused: desiredPaused() }));
-    replace('stop', () => submit({ type: 'stop' }));
-    replace('setRepeatMode', repeatMode => submit({ type: 'setRepeatMode', repeatMode }));
-    const select = (entry, paused = false, options) => entry ? submit({ type: 'select', queueItemId: entry.id, positionTicks: 0, paused }, options) : Promise.resolve();
-    replace('nextTrack', () => { const state = snapshot(); return select(state?.queue?.[state.index + 1]); });
-    replace('previousTrack', () => { const state = snapshot(); return select(state?.queue?.[state.index - 1]); });
-    replace('setCurrentPlaylistItem', id => select(snapshot()?.queue.find(entry => entry.id === id)));
-    const replaceQueue = queue => {
-        const state = snapshot();
-        if (!state) return;
-        if (!queue.length) return submit({ type: 'stop' });
-        const id = currentEntry(state)?.id;
-        const index = Math.max(0, queue.findIndex(entry => entry.id === id));
-        return submit({ type: 'setQueue', queue, index: queue.length ? index : -1,
-            positionTicks: queue[index]?.id === id ? position() : 0, paused: state.paused });
-    };
-    replace('clearQueue', clearCurrent => replaceQueue(clearCurrent ? [] : [currentEntry(snapshot())].filter(Boolean)));
-    replace('removeFromPlaylist', ids => replaceQueue(snapshot()?.queue.filter(entry => !ids.includes(entry.id)) || []));
-    replace('movePlaylistItem', (id, newIndex) => {
-        const queue = [...snapshot()?.queue || []]; const index = queue.findIndex(entry => entry.id === id);
-        if (index < 0 || newIndex < 0 || newIndex >= queue.length) return;
-        queue.splice(newIndex, 0, queue.splice(index, 1)[0]); return replaceQueue(queue);
+    async function prepare(entry, next, key) {
+        const ownGeneration = ++generation;
+        loadingIdentity = key; selectedIdentity = ''; sleeping = false; setBlocked(false); presence?.clear(); played = false;
+        // Invalidates the previous native prepare before awaiting another item.
+        handler.closePlayer();
+        try {
+            const item = await loadItem(entry.itemId);
+            if (closed || generation !== ownGeneration || identity(snapshot?.queue[snapshot.index]) !== key) return;
+            if (entry.episodeId && !item.media?.episodes?.some(episode => episode.id === entry.episodeId)) throw new Error('This podcast episode is unavailable.');
+            metadata.set(`${entry.itemId}:${entry.episodeId || ''}`, nativeMetadata(item, entry.episodeId));
+            commit('setMediaPlaying', { libraryItem: item, episodeId: entry.episodeId || null, queueItems: queueForNative(snapshot.queue) });
+            ctx.coverAspectRatio = store.getters['libraries/getBookCoverAspectRatio'];
+            ctx.currentPlaybackRate = snapshot.playbackRate || 1;
+            ctx.$nextTick(() => ctx.$refs.audioPlayer?.checkUpdateChapterTrack());
+            selectedIdentity = key; loadingIdentity = '';
+            pendingEffect = { origin: "reconcile", type: "seek" };
+            handler.load(item, entry.episodeId || null, !snapshot.paused, snapshot.playbackRate || 1, seconds(snapshot.positionTicks));
+            observeAudio();
+            stableSince = now();
+        } catch {
+            if (closed || generation !== ownGeneration) return;
+            loadingIdentity = ''; selectedIdentity = ''; onError('The selected audiobook could not be loaded. Try Play again.');
+        }
+    }
+    function synchronize(next, effect = {}) {
+        if (!handler.player) return;
+        if (handler.playerState === 'LOADING' || (currentAudio() && currentAudio().readyState < 1)) {
+            pendingEffect = { ...effect, type: effect.type === 'seek' || pendingEffect?.type === 'seek' ? 'seek' : effect.type };
+            handler.playWhenReady = !next.paused && !sleeping;
+            handler.startTimeOverride = seconds(next.positionTicks);
+            handler.initialPlaybackRate = next.playbackRate || 1;
+            handler.player.playWhenReady = handler.playWhenReady;
+            if (next.paused) handler.pause();
+            return;
+        }
+        const target = seconds(next.positionTicks);
+        const rate = next.playbackRate || 1;
+        const actual = handler.getCurrentTime();
+        const drift = target - actual;
+        ctx.currentPlaybackRate = rate;
+        if (ctx.$refs.audioPlayer) ctx.$refs.audioPlayer.playbackRate = rate;
+        const explicit = ['seek', 'select', 'setQueue'].includes(effect.type) || effect.resumed;
+        if (explicit || (next.paused && Math.abs(drift) > 0.25)) { handler.seek(target); stableSince = now(); }
+        handler.setPlaybackRate(rate);
+        if (next.paused || sleeping) {
+            handler.pause(); handler.setPlaybackRate(rate); return;
+        }
+        if (effect.origin === 'local') { sleeping = false; setBlocked(false); }
+        if (!handler.playerPlaying && !blocked) handler.play();
+        if (effect.origin === 'local' || effect.resumed) stableSince = now();
+    }
+    function onPlaying() {
+        played = true; buffering = false; stableSince = now(); setBlocked(false);
+        const latest = engine.getSnapshot();
+        if (latest?.paused || sleeping) handler.pause();
+        if (pendingEffect && latest) { const effect = pendingEffect; pendingEffect = undefined; synchronize(latest, effect); }
+    }
+    function onLoadedMetadata() {
+        const latest = engine.getSnapshot();
+        if (latest && pendingEffect) { const effect = pendingEffect; pendingEffect = undefined; synchronize(latest, effect); }
+    }
+    function onWaiting() { buffering = true; stableSince = now(); }
+    function onBlockedEvent(event) { if (event.target === currentAudio()) setBlocked(true); }
+    function observeAudio() {
+        const next = currentAudio();
+        if (next === audio) return;
+        if (audio) { audio.removeEventListener('playing', onPlaying); audio.removeEventListener('waiting', onWaiting); audio.removeEventListener('loadedmetadata', onLoadedMetadata); }
+        audio = next; played = false; buffering = false;
+        if (audio) { audio.addEventListener('playing', onPlaying); audio.addEventListener('waiting', onWaiting); audio.addEventListener('loadedmetadata', onLoadedMetadata); }
+    }
+    function tick() {
+        if (closed) return;
+        observeAudio();
+        const value = engine.getSnapshot();
+        if (!value) return;
+        snapshot = value; onSnapshot(value);
+        const entry = value.queue[value.index];
+        if (!entry || loadingIdentity || selectedIdentity !== identity(entry)) return;
+        if (pendingEffect && audio?.readyState >= 1 && handler.playerState !== 'LOADING') { const effect = pendingEffect; pendingEffect = undefined; synchronize(value, effect); }
+        const rate = value.playbackRate || 1;
+        const actual = handler.getCurrentTime(), target = seconds(value.positionTicks), drift = target - actual;
+        if (audio && !audio.paused && audio.readyState >= 3 && !buffering && !value.paused && !sleeping && now() - stableSince > 3000) {
+            const offset = handler.player.currentTrack?.startOffset || 0;
+            let buffered = false;
+            for (let index = 0; index < audio.buffered.length; index++) {
+                if (target >= offset + audio.buffered.start(index) && target + Math.max(1, rate) < offset + audio.buffered.end(index)) buffered = true;
+            }
+            if (!buffered && Math.abs(drift) > 3 && now() - driftSeekAt > 15000 && now() - stableSince > 10000) { handler.seek(target, false); driftSeekAt = now(); stableSince = now(); }
+            else if (buffered && Math.abs(drift) > 1.5 && now() - driftSeekAt > 3000) { handler.seek(target, false); driftSeekAt = now(); }
+            else handler.setPlaybackRate(buffered && Math.abs(drift) > 0.25 ? rate * (drift > 0 ? 1.03 : 0.97) : rate);
+        }
+        if (played && audio && !audio.ended && handler.libraryItem) {
+            presence?.update({ kind: 'audio', title: handler.displayTitle || handler.libraryItem.media?.metadata?.title || 'Audiobook',
+                positionMs: actual * 1000, durationMs: handler.getDuration() * 1000, paused: audio.paused, buffering,
+                playbackRate: rate });
+        } else presence?.clear();
+    }
+    const timer = setInterval(tick, 1000);
+    document.addEventListener('audiobookshelf-activity-playback-blocked', onBlockedEvent, true);
+    const unsubscribe = store.subscribe(mutation => {
+        if (closed || suppressQueue || !snapshot || !['setPlayerQueueItems', 'addItemToQueue', 'removeItemFromQueue'].includes(mutation.type)) return;
+        const queue = (store.state.playerQueueItems || []).map(item => ({ id: item.activityEntryId || randomId(), itemId: item.libraryItemId, ...(item.episodeId ? { episodeId: item.episodeId } : {}) }));
+        const selected = snapshot.queue[snapshot.index];
+        const index = queue.findIndex(entry => entry.id === selected?.id);
+        if (!queue.length) submit({ type: 'stop' });
+        else submit({ type: 'setQueue', queue, index: Math.max(0, index), positionTicks: index < 0 ? 0 : snapshot.positionTicks, paused: snapshot.paused });
     });
-    for (const name of ['setQueueShuffleMode', 'toggleQueueShuffleMode']) replace(name, (...args) => {
-        invoke(name, ...args);
-        return replaceQueue(manager._playQueueManager.getPlaylist().map(item => ({ id: item.PlaylistItemId, itemId: item.Id })));
-    });
-
-    const hook = {
-        beginPreparation: () => ++preparationSequence,
-        isPreparationCurrent: value => !closed && value === preparationSequence,
-        cancelPendingPreparation() {
-            if (closed) return;
-            // Back cancels both item expansion and a stream still being opened.
-            // Otherwise its late completion can reopen the video after leaving.
-            preparationSequence++;
-            if (!preparing && !failedPreparation) return;
-            generation++; preparing = undefined; failedPreparation = undefined;
-            // Match native Back from the loaded player: stop the queued playback.
-            // Ordinary browsing with an already playing stream is unaffected here.
-            return submit({ type: 'stop' });
-        },
-        playPrepared(values, options) {
-            const queue = values.map((item, index) => {
-                const id = host.crypto.randomUUID();
-                const itemOptions = { ...options };
-                // A chosen version and numeric stream indices belong to one
-                // episode. Later episodes use native language/track matching.
-                if (index !== (options.startIndex || 0)) {
-                    delete itemOptions.mediaSourceId;
-                    delete itemOptions.audioStreamIndex;
-                    delete itemOptions.subtitleStreamIndex;
-                }
-                items.set(id, { ...item, PlaylistItemId: id }); playOptions.set(id, itemOptions);
-                return { id, itemId: item.Id };
-            });
-            return submit({ type: 'setQueue', queue, index: Math.min(options.startIndex || 0, queue.length - 1),
-                positionTicks: options.startPositionTicks || 0, paused: false });
-        },
-        queuePrepared(values, mode) {
-            const state = snapshot();
-            if (!currentEntry(state)) return hook.playPrepared(values, {});
-            const additions = values.map(item => {
-                const id = host.crypto.randomUUID(); items.set(id, { ...item, PlaylistItemId: id });
-                return { id, itemId: item.Id };
-            });
-            const queue = [...state.queue];
-            queue.splice(mode === 'next' ? state.index + 1 : queue.length, 0, ...additions);
-            return replaceQueue(queue);
-        },
-        captureEnded(state) {
-            const current = snapshot();
-            if (!current || state.PlayState?.PlaylistItemId !== currentEntry(current)?.id || activeEntry !== entryKey(currentEntry(current))) return;
-            // HTML media clears its source on ended. A repeat must prepare a
-            // fresh playback instance even when the queue entry is unchanged.
-            endedEntry = activeEntry; activeEntry = undefined;
-            return { epoch: current.epoch, queueRevision: current.queueRevision };
-        },
-        ended(state, ended) {
-            const current = snapshot();
-            if (!current || !ended || ended.epoch !== current.epoch || ended.queueRevision !== current.queueRevision
-                || state.PlayState?.PlaylistItemId !== currentEntry(current)?.id) return;
-            const repeat = current.repeatMode;
-            const next = repeat === 'RepeatOne' ? current.index
-                : current.index + 1 < current.queue.length ? current.index + 1
-                    : repeat === 'RepeatAll' ? 0 : -1;
-            if (next < 0) return submit({ type: 'stop' }, { automatic: true });
-            return select(current.queue[next], false, { automatic: true });
-        }
-    };
-    manager.activityPlayback = hook;
-    const nativePausedChanged = () => {
-        if (manager.paused()) { readySince = undefined; resetRate(); }
-        // Native fullscreen controls need their original gesture. Browser/OS
-        // interruption and autoplay recovery are personal, never party commands.
-        if (closed || preparing || buffered || now() > nativeGestureUntil || !nativeGestureUntil || !getPlayer() || !currentEntry(snapshot())) return;
-        nativeGestureUntil = 0;
-        const paused = Boolean(manager.paused());
-        if (paused !== desiredPaused()) void submit({ type: 'setPlayback', paused, positionTicks: controlPosition() });
-    };
-    const playing = () => {
-        if (buffered || readySince == null) readySince = now();
-        buffered = false; playbackBlocked = false;
-        if (!preparing && snapshot()) applyTimeline(snapshot(), { origin: 'reconcile' });
-    };
-    const waiting = () => { buffered = true; readySince = undefined; resetRate(); };
-    const blocked = event => {
-        if (event.target?.matches?.('video.htmlvideoplayer, audio.htmlaudioplayer')) {
-            playbackBlocked = true; readySince = undefined; resetRate();
-        }
-    };
-    const bind = () => {
-        resetRate();
-        if (player) for (const [name, handler] of [['pause', nativePausedChanged], ['unpause', nativePausedChanged], ['playing', playing], ['waiting', waiting]]) events.off(player, name, handler);
-        player = getPlayer();
-        if (player) for (const [name, handler] of [['pause', nativePausedChanged], ['unpause', nativePausedChanged], ['playing', playing], ['waiting', waiting]]) events.on(player, name, handler);
-    };
-    events.on(manager, 'playerchange', bind); bind();
-    const seeked = event => {
-        if (closed || preparing || now() > nativeGestureUntil || !nativeGestureUntil || !event.target?.matches?.('video.htmlvideoplayer, audio.htmlaudioplayer')) return;
-        const state = snapshot(); if (!currentEntry(state)) return;
-        const ticks = position();
-        if (ignoreSeek && now() <= ignoreSeek.until && Math.abs(ticks - ignoreSeek.ticks) < 5_000_000) return;
-        if (Math.abs(ticks - state.positionTicks) > 5_000_000) {
-            nativeGestureUntil = 0;
-            void submit({ type: 'seek', positionTicks: ticks, paused: state.paused });
-        }
-    };
-    const gesture = event => {
-        if (event.isTrusted && event.target?.closest?.('.videoPlayerContainer, audio.htmlaudioplayer')) nativeGestureUntil = now() + 1500;
-    };
-    for (const event of ['pointerdown', 'touchstart', 'keydown']) host.document.addEventListener(event, gesture, true);
-    host.document.addEventListener('seeked', seeked, true);
-    host.document.addEventListener(PLAYBACK_BLOCKED_EVENT, blocked, true);
-    const timer = host.setInterval(() => {
-        if (closed || preparing) return;
-        if (failedPreparation?.retryable && failedPreparation.attempts <= 3 && now() >= failedPreparation.after) {
-            apply(snapshot() || desired, { origin: 'retry' });
-        } else if (!buffered && snapshot()) applyTimeline(snapshot(), { origin: 'reconcile' });
-    }, 1000);
     return {
-        start: () => client.start(),
-        getSnapshot: snapshot,
-        dispose() {
-            closed = true; generation++; preparationSequence++; preparing = undefined;
-            client.dispose(); resetRate(); host.clearInterval(timer);
-            host.document.removeEventListener('seeked', seeked, true);
-            host.document.removeEventListener(PLAYBACK_BLOCKED_EVENT, blocked, true);
-            for (const event of ['pointerdown', 'touchstart', 'keydown']) host.document.removeEventListener(event, gesture, true);
-            events.off(manager, 'playerchange', bind);
-            if (player) for (const [name, handler] of [['pause', nativePausedChanged], ['unpause', nativePausedChanged], ['playing', playing], ['waiting', waiting]]) events.off(player, name, handler);
-            for (const [name, callback] of installed) if (manager[name] === callback) manager[name] = original.get(name);
-            if (manager.activityPlayback === hook) delete manager.activityPlayback;
-            items.clear(); playOptions.clear();
-        }
+        start: () => engine.start(),
+        getSnapshot: () => engine.getSnapshot(),
+        playSelection(payload) {
+            if (!payload?.libraryItemId) return;
+            sleeping = false;
+            const active = snapshot?.queue[snapshot.index];
+            if (active?.itemId === payload.libraryItemId && active.episodeId === (payload.episodeId || undefined) && !payload.queueItems?.length) {
+                if (Number.isFinite(payload.startTime)) return submit({ type: 'seek', positionTicks: payload.startTime * TICKS, paused: false });
+                return this.play();
+            }
+            const items = payload.queueItems?.length ? payload.queueItems : [{ libraryItemId: payload.libraryItemId, episodeId: payload.episodeId }];
+            const queue = items.map(item => {
+                metadata.set(`${item.libraryItemId}:${item.episodeId || ''}`, item);
+                return { id: randomId(), itemId: item.libraryItemId, ...(item.episodeId ? { episodeId: item.episodeId } : {}) };
+            });
+            let index = queue.findIndex(entry => entry.itemId === payload.libraryItemId && entry.episodeId === (payload.episodeId || undefined));
+            if (index < 0) { queue.unshift({ id: randomId(), itemId: payload.libraryItemId, ...(payload.episodeId ? { episodeId: payload.episodeId } : {}) }); index = 0; }
+            const progress = store.getters['user/getUserMediaProgress'](payload.libraryItemId, payload.episodeId);
+            const position = Number.isFinite(payload.startTime) ? payload.startTime : (progress?.isFinished ? 0 : progress?.currentTime || 0);
+            return submit({ type: 'setQueue', queue, index, positionTicks: position * TICKS, paused: false });
+        },
+        play() {
+            sleeping = false; setBlocked(false);
+            // Run play in the original user gesture, before any network work.
+            if (handler.playerState === 'ERROR') { selectedIdentity = ''; void engine.refresh(true); return; }
+            if (snapshot && !snapshot.paused && handler.player) handler.seek(seconds(engine.getSnapshot().positionTicks), false);
+            handler.play();
+            if (!snapshot) return;
+            if (!snapshot.paused) { if (!handler.libraryItem) return engine.refresh(true); return; }
+            return submit({ type: 'setPlayback', paused: false });
+        },
+        pause() { if (snapshot) return submit({ type: 'setPlayback', paused: true }); },
+        playPause() { if (!snapshot) return; if (snapshot.paused || !handler.playerPlaying || sleeping || blocked) return this.play(); return this.pause(); },
+        seek(time) { if (snapshot && Number.isFinite(time)) return submit({ type: 'seek', positionTicks: Math.max(0, time) * TICKS, paused: snapshot.paused }); },
+        jump(delta) { return this.seek(handler.getCurrentTime() + delta); },
+        rate(value) { if (Number.isFinite(value)) return submit({ type: 'setPlaybackRate', playbackRate: value }); },
+        repeat(value) { return submit({ type: 'setRepeatMode', repeatMode: value }); },
+        selectIndex(index, automatic = false) {
+            const entry = snapshot?.queue[index];
+            if (!entry) return;
+            return submit({ type: 'select', queueItemId: entry.id, positionTicks: 0, paused: false }, { automatic });
+        },
+        next() { return this.selectIndex((snapshot?.index ?? -1) + 1); },
+        previous() { return this.selectIndex((snapshot?.index ?? 0) - 1); },
+        ended(itemId, episodeId) {
+            const entry = snapshot?.queue[snapshot.index];
+            if (!entry || entry.itemId !== itemId || (entry.episodeId || null) !== (episodeId || null)) return;
+            if (snapshot.repeatMode === 'RepeatOne') { selectedIdentity = ''; return this.selectIndex(snapshot.index, true); }
+            if (snapshot.index + 1 < snapshot.queue.length) return this.selectIndex(snapshot.index + 1, true);
+            if (snapshot.repeatMode === 'RepeatAll') return this.selectIndex(0, true);
+            return submit({ type: 'stop' }, { automatic: true });
+        },
+        stop() { return submit({ type: 'stop' }); },
+        localPause() { sleeping = true; handler.pause(); },
+        unlock() { sleeping = false; setBlocked(false); const element = currentAudio(); if (!element) return;
+            // The exact existing element gets the synchronous user activation.
+            const attempt = element.play();
+            Promise.resolve(attempt).then(() => { if (snapshot?.paused) handler.pause(); else if (snapshot) handler.seek(seconds(engine.getSnapshot().positionTicks), false); }).catch(() => setBlocked(true));
+        },
+        dispose() { closed = true; generation++; clearInterval(timer); unsubscribe(); engine.dispose(); presence?.clear();
+            document.removeEventListener('audiobookshelf-activity-playback-blocked', onBlockedEvent, true);
+            if (audio) { audio.removeEventListener('playing', onPlaying); audio.removeEventListener('waiting', onWaiting); audio.removeEventListener('loadedmetadata', onLoadedMetadata); }
+            handler.closePlayer(); onBlocked(false); }
     };
 }

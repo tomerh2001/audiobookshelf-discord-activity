@@ -1,297 +1,47 @@
-# Native Jellyfin client
+# Native Audiobookshelf client
 
-`node native-client/build.mjs` builds the actual Jellyfin Web 12.0.0 client.
-Use Node24 with npm11 or newer and `tar`; no global npm installation is required.
-The source commit, archive SHA256 and license are pinned in `upstream.json`.
-The upstream npm lockfile supplies dependency integrity. Output goes to `dist/`
-and the Activity API serves its `index.html` at the mapped origin's root.
-The native HashRouter owns navigation within the Activity document.
+Audiobookshelf Listen builds the official Audiobookshelf **2.38.0** web client from the exact commit and SHA-256 archive recorded in `upstream.json`. The upstream Nuxt 2 / Vue 2 application owns the document, bookshelf, item pages, search, chapters, bookmarks and audio player. The integration changes are applied to a clean source extraction before compilation. Changed patch anchors stop the build.
 
-Back is available on non-root browsing pages and in the video toolbar. A restored
-page with no previous Activity entry returns to Home. The Activity records its
-own committed locations, including same-page dialog entries. Browser Back can
-traverse Discord's parent history even when the Activity's HashRouter index is
-positive, so internal Back returns to a recorded destination directly.
-Back cancels unfinished page and playback preparation so a late stream response
-cannot reopen the video after leaving. Dialog closing preserves pending playback.
-Account replacement also clears a pending Back listener and promise. Loading and
-revalidation updates do not count as completed navigation.
+Build with Node 24 and npm:
 
-The build applies reproducible integration patches before compiling the upstream source:
+```sh
+node native-client/build.mjs
+```
 
-- Jellyfin 12's upstream **Modern** application supplies the responsive desktop
-  and mobile interface. The app selects its native desktop/mobile mode before
-  the router initializes, so a stored display preference cannot select the old
-  application. The old layout selector is removed from Modern preferences.
-  Modern's own video page combines its MUI toolbar with Jellyfin's shared video
-  controller; seek previews, fullscreen and Activity synchronization extend that same player.
-  There is no iframe or separate playback interface.
+Use `--prepare-only` to extract and patch without installing dependencies or compiling. The complete client is written to `native-client/dist`. Build the workspace session library separately and copy `apps/activity-web/dist/activity-session.js` into that directory before serving it. `npm ci` retains optional platform packages because Tailwind's native compiler requires them. Lifecycle scripts and the Cypress binary download remain disabled.
 
-- The native document loads the [session library](../apps/activity-web/README.md)
-  once, before the adapter initializes. That library supplies Discord SDK
-  authentication and the broker API without rendering a separate interface.
-  In a Discord frame it starts the existing deduplicated authentication flow
-  immediately, overlapping native parsing and translation loading. Native
-  initialization awaits that same session, selects the Jellyfin connection,
-  and then renders the native application.
-- Both legacy settings and the React configuration provider use the configuration
-  packaged in the same build. They do not fetch `config.json` again at startup.
-  Configuration changes therefore require a new native build and release.
-- The Modern toolbar's MUI SyncPlay button, also used by its video OSD,
-  opens **Watch party** only when clicked. It shows the people in the current
-  Discord Activity, their display names and avatars, and identifies the current
-  viewer as **You**. It remains available to signed-in viewers regardless of their
-  upstream SyncPlay permission or plugin state, and does not show a dormant
-  SyncPlay status badge. The only action is **Close**. Fullscreen stays with Jellyfin's
-  player controls. The roster uses the Embedded App SDK's
-  `getActivityInstanceConnectedParticipants` snapshot and
-  `ACTIVITY_INSTANCE_PARTICIPANTS_UPDATE` events; an existing unused getter alone
-  did not render any participants. A newer push wins over an older pending
-  snapshot so a departed person cannot reappear. Opening the panel refreshes
-  its data without another OAuth exchange or background polling. Names are
-  rendered as text and avatar paths contain only validated Discord IDs/hashes.
-  This is Activity presence, not proof of Jellyfin authentication, playback
-  readiness or authorization; server-side membership and account checks remain
-  independent. SDK errors retain the last roster with an explicit warning.
-- First use renders Jellyfin's own login page and native form controls inside
-  the Modern app. The form adds the server URL and an explicit **Sign in as
-  community user** button where configured. Personal credentials go to the
-  broker, which keeps only the encrypted Jellyfin token. No login happens from
-  a single saved account unless the user previously selected that preference.
-  Subsequent launches restore that choice. The native **Sign out** action
-  deletes the selected saved connection, revokes its viewer capabilities and
-  returns to login; it keeps the Discord session and other viewers connected.
-  Every successful personal or community login installs a fresh native client
-  and automatically joins the current Activity party after its socket opens.
-  Bootstrap can render login before an ApiClient exists. The Activity coordinator
-  connects once the authenticated native client and player plugins are ready.
-- The native ApiClient receives an opaque gateway capability, account and device
-  identity. Real Jellyfin credentials remain on the broker. Native credentials
-  are held in memory and service-worker registration is disabled.
-- A classic script runs before native modules and supplies separate in-memory
-  localStorage/sessionStorage objects. Discord can deny the storage getters even
-  on HTTPS. The optional CacheStorage response cache is disabled before its
-  constructor runs. Browser preferences last for the current Activity document;
-  saved server accounts remain on the broker.
-  Jellyfin 12's IndexedDB query persistence is also removed: the native root uses
-  an in-memory QueryClientProvider, and its query module has no IndexedDB
-  persister. Account replacement clears that document's query cache.
-- Jellyfin 12's SDK subscriptions own one WebSocket per native ApiClient. The
-  adapter bridges its status to the native player and Activity lifecycle,
-  without opening a second connection. Identical
-  authentication metadata does not reconnect an unchanged capability. SDK and
-  legacy subscribers share account ownership checks; unsubscribe, client close
-  and replacement suppress late callbacks, and close disables SDK reconnection.
-- The Activity owns one ordered playback timeline. Its `ActivityPlaybackCommand`,
-  `ActivityPlaybackState` and `ActivityPlaybackError` messages reuse that native
-  authenticated WebSocket. `/jf/:capability/Activity/Playback` supplies recovery
-  snapshots; the capability stays inside the native document and gateway.
-  Native SyncPlay group joins, commands and waiting callbacks are not used.
-  The gateway denies the old SyncPlay routes and events, so only the Activity
-  coordinator can control shared playback. A socket outage lasting 40 seconds
-  asks the document's controller for a fresh gateway launch.
-- Native Play still expands episodes, multipart media and intros before the
-  prepared queue enters Jellyfin's original stream-selection and reporting
-  pipeline. Each shared queue entry has its own ID, even when the same media
-  appears twice. Local play/pause and buffered seek effects run before the
-  command is sent; Next/Previous select an explicit queue entry immediately.
-  Matching acknowledgements do not replay the action. Personal audio, subtitles,
-  quality and volume remain with the native player. Repeat None/One/All is shared
-  through the native repeat control. Automatic advancement follows this shared
-  queue regardless of personal AutoNext preferences. Each ended callback belongs
-  to its captured queue revision; RepeatOne prepares the media again because the
-  native HTML player clears its source on ended. Simultaneous natural ends
-  quietly follow the accepted advancement; manual conflicts still show feedback.
-  Cached items are identified by
-  both shared entry ID and media ID, so an entry cannot retain a replaced movie.
-  Preparation selects that identity inside its own item array; a concurrent queue
-  insertion cannot substitute a different movie by shifting the latest index.
-- New viewers retrieve the current queue and timeline. Buffering remains local;
-  it does not issue a shared Pause. The adapter checks drift once per second
-  when ready: 250–1500 ms uses a 3% adjustment around the viewer's playback rate;
-  larger drift uses a seek with a three-second cooldown. Paused seeks stay paused.
-  Native fullscreen control events require a recent trusted media-control gesture
-  before becoming party commands; autoplay recovery and OS interruptions do not
-  become shared pauses. These thresholds require compiled-player and physical
-  device validation; see the [implementation and verification record](../docs/syncplay-responsiveness-plan.md).
-- If an accessible episode is absent from Jellyfin's expanded series response,
-  playback keeps the originally selected episode rather than sending an empty
-  queue. Other queue validation failures produce a native toast with fixed text;
-  only the three known queue error codes on the active gateway are accepted.
-- Shared playback uses native skip prompts, even if the account previously
-  selected automatic skipping. That prevents a personal preference from seeking
-  everyone else's playback. Remote player plugins and the group picker are not
-  part of the Activity UI. The shared Modern SyncPlay button does not load or
-  expose arbitrary server groups; the verified Discord party owns membership.
-  Modern toolbar and video controls omit the unsupported remote-player button.
-- A blocked media element opens a native **Join playback** dialog containing
-  **Tap to play on this device**. The click calls that exact element's `play()` before any asynchronous
-  work; a temporary silent audio probe cannot grant a different video element
-  WebKit playback permission. This never sends a shared Unpause command, and it
-  restores a paused/stopped Activity state after unlocking. The button stays
-  available on failure and disappears when playback succeeds. Native
-  `playbackstart` fires during preparation and cannot prove autoplay succeeded.
-  The native video player's separate `unpause()` path also reports a rejected
-  play attempt to the same recovery control. Stop and account replacement
-  explicitly reset that prompt and invalidate pending play attempts. Native
-  destruction can detach the video before its queued `emptied` event reaches
-  the document, so listening for `emptied` alone is insufficient.
-- Native view navigation bubbles a custom `pagehide` from a DIV. It must not
-  dispose document-wide adapter listeners. `onDocumentExit` accepts only a real
-  window `PageTransitionEvent` with `persisted: false`; it does not use `once`,
-  since a filtered custom event would still consume a once-only listener.
-  Playback prompts, layout, queue feedback and video observers therefore survive
-  ordinary Home-to-details navigation and back/forward-cache preservation.
-- Discord's focused, picture-in-picture and grid layouts resize the existing
-  player. Video previews hide library/navigation chrome. The layout event does
-  not require another OAuth exchange or a new document. Jellyfin's standard
-  fullscreen button, F shortcut and double-click synchronously request document
-  fullscreen, keeping Jellyfin's OSD and subtitle overlays visible. Where only
-  Safari video fullscreen is available, the native player uses its exact video
-  element and tracks that element's fullscreen entry/exit events. Mobile orientation
-  methods retain their Screen or ScreenOrientation receiver. Those listeners
-  are removed with the player. Unsupported requests and synchronous/asynchronous
-  refusals show fixed native toast feedback without changing playback or the party.
-  Discord's embedding policy can refuse fullscreen, and the Activity cannot force
-  the outer Discord application window into fullscreen. SDK 2.5.0 has no command
-  to override that policy. See [Discord SDK commands](https://github.com/discord/embedded-app-sdk/blob/v2.5.0/src/commands/index.ts),
-  [Discord layouts](https://docs.discord.com/developers/activities/development-guides/layout)
-  and [fullscreen requirements](https://developer.mozilla.org/en-US/docs/Web/API/Element/requestFullscreen).
-- Discord can replace the entire document when popping an Activity out or back
-  in, and can assign a new instance ID if the Activity was otherwise empty
-  ([upstream report](https://github.com/discord/embedded-app-sdk/issues/202)).
-  Fresh documents authenticate normally, recover the saved account, and restore
-  the last allowed browsing route from a short-lived server checkpoint. The
-  Activity coordinator supplies the queue, position and paused/playing state. Within the
-  same document, account reconnection retains the current browsing route; an
-  explicit account change starts at that account's Home.
-  Checkpoints are saved on native navigation, renewed while watching, and flushed
-  with keepalive on real document exit. They contain no tokens or playback commands.
-  A new verified instance can reclaim one recently disconnected group only for
-  the same user, connection, server and guild/channel, with no connected viewers.
-  Old capabilities are revoked. Sign out or account removal invalidates
-  restoration. The Activity cannot suppress Discord's own refresh prompt.
-- [HLS.js](https://github.com/video-dev/hls.js) 1.6.16 uses its lockfile-pinned
-  standalone worker asset. Rebundling the default
-  stringified worker factory can leave a webpack module reference outside its
-  scope (`ReferenceError: e is not defined`) and silently fall back to main-thread
-  processing. The unchanged worker and its Apache-2.0 license, including upstream
-  copyright notices, are copied into the build.
+## Discord, accounts and login
 
-Discord and Jellyfin keep their authenticated state in the same document.
-Concurrent startup and session recovery share their in-flight work. Recovery
-uses the already-held Discord OAuth token; the backend checks its application,
-scope, expiry, user identity and current Activity membership before issuing a
-replacement session. No cached identity or browser storage can supply that proof.
-The Discord SDK stays connected during Jellyfin sign-out and sign-in.
-Closing the Activity leaves the voice call connected.
+The native login screen uses Audiobookshelf form components and adds the server address, explicit community login, saved accounts and **Sign in with Authentik / SSO**. SSO opens the configured Audiobookshelf identity-provider flow in the external browser and polls the session-bound broker result. It supports Authentik through Audiobookshelf's native OIDC integration. Passwords are cleared after use; the real upstream credentials remain on the backend.
 
-Joining checks both the server URL and identity. A saved preferred connection
-cannot replace an existing party. The login page uses that party's server and
-maps the operator's canonical default to its configured public address for
-presentation. To use another server, start another Activity. Account switching
-keeps the Discord SDK document alive. The adapter restores local controls before stopping
-only local playback, closes its socket, and clears native query and cached view
-state. That prevents a local account change from issuing a shared Stop or
-showing the previous account's cached library.
+The session library performs Discord authentication once. Its retained in-memory authorization can recover an expired broker session after independent backend verification. Signing out removes the selected saved account and returns to native login while Discord and other listeners remain connected. Account replacement invalidates pending native media preparation, rejects old HTTP responses and remounts account-owned views.
 
-Account changes also cancel queued native navigation and invalidate pending view
-imports, controller initialization and cached restoration. Cancelled initialized
-controllers receive cleanup once. A late account response or media-preparation
-response cannot reinstall the previous account, show its old page or start its
-previous item. A navigation cancelled before `viewshow` releases the router's
-pending promise and clears its delayed history push, so the login route can open.
+Native requests use a temporary `/abs/<capability>` gateway. The original upstream token is never installed in the client. Separate in-memory localStorage and sessionStorage work even when Discord refuses persistent storage. Service-worker/PWA caching is disabled. The native router uses the hash inside the same document; route checkpoints contain only allowlisted browsing paths.
 
-Launch commands and the configured entry point respond only to a user invocation
-and do not send an automatic channel invitation. Discord's native invitation and
-Join Activity controls bring friends into the same running Activity. The native
-Watch party button shows only its live participants and a Close control.
+Packaging moves Nuxt's generated inline executable bootstraps into same-origin script files, in their original order. The native document can therefore run under `script-src 'self'` without `unsafe-inline` or `unsafe-eval`. JSON script data remains unchanged.
 
-Discord Rich Presence follows actual local playback, using the native player
-metadata without extra Jellyfin requests. Episodes show the series, season,
-episode number or range, and episode title; movies show their title and year.
-Playing media supplies a progress interval, adjusted for seeking and playback
-speed and native transcoding offsets. Paused/buffering media shows its position without a moving clock. Stop,
-account replacement and session recovery clear the previous title. Local media
-events must establish playback before a preparatory manager event can publish it.
-The manager event may also follow the DOM `playing` event or a failed play
-attempt. A 15-second local read refreshes metadata without a network request.
+## Listening together
 
-Normal Activity authorization requests `identify` and `rpc.activities.write`.
-Presence uses the granted scopes in Discord's authenticated response; denied or
-unsupported presence never blocks the player or triggers another authorization
-flow. The publisher coalesces changes with at least five seconds between RPCs,
-keeps a stable playback clock, and shares its transport across account changes.
-Only human-readable media metadata and public Discord application artwork are
-published. Jellyfin tokens, server addresses, protected artwork, item identifiers
-and custom join secrets never enter the presence payload. Discord owns invitations
-and card rendering; its fixed application name remains **Jellyfin Watch**, and
-compact cards may omit the richer fields. See [Discord's Activity Rich Presence
-guide](https://docs.discord.com/developers/rich-presence/using-with-the-embedded-app-sdk).
+Audiobookshelf's server does not currently provide a native listening-party protocol. The Activity coordinator owns the shared queue, position, pause state, repeat mode and playback speed. `nativePlaybackAdapter.js` connects that coordinator to the real upstream `PlayerHandler` and `MediaPlayerContainer`; it does not create a replacement audio player.
 
-The gateway reports `/System/Endpoint` as remote. Jellyfin sees the gateway's
-local connection, while the viewer receives media through Discord. Passing
-`IsInNetwork: true` to native Web overrides a slow measured connection with a
-140 Mbps minimum; keep both `IsInNetwork` and `IsLocal` false so automatic quality
-uses the actual browser download test. This does not impose a fixed quality cap.
+All connected authorized listeners can control the party. Queue entries have individual identities, including repeated media and podcast episodes. The adapter translates Audiobookshelf's whole-book seconds, including track offsets, to the coordinator's ticks. Shared playback uses the current queue rather than a personal Auto Play preference. Volume and sleep timers remain local; a sleep timer cannot pause everyone. Bookmarks and progress belong to the selected upstream account, so community users share them.
 
-Fatal HLS network errors already exhausted the library's own retry policy.
-Allow at most two explicit restarts, and renew that budget only after 30 seconds
-of progressing playback. Seeks, paused time and downloads alone are not evidence
-of recovery. A terminal failure reaches the native error flow instead of
-reloading the same fragment indefinitely.
+Controls apply locally before acknowledgement. Ordered command IDs, revisions and recovery snapshots prevent replaying stale clicks after reconnection. A delayed native session load reconciles the latest pause, seek and speed before playback. The player follows new books and podcast episodes after mobile visibility/online recovery. Steady playback uses buffered drift correction; resume and persistent large drift can seek across tracks. Completed books restart at zero unless an explicit start time was chosen.
 
-For browser diagnostics, never print native network logs or raw gateway paths:
-the `/jf/` path segment is a credential. A local HTTP smoke harness should load
-an actual response from the candidate origin. Intercepting the top-level
-document with Playwright `route.fulfill` can
-give Chromium the wrong address-space classification and trigger a misleading
-private-network CORS error. Verify the complete compiled document after changing
-upstream integration patches. Mobile viewport checks do not verify physical iOS or Android media
-policies, background playback, or outer Discord fullscreen.
+The existing native player negotiates direct audio or HLS and reports listening progress through its authorized upstream session. Filtered Audiobookshelf stream events share the Activity WebSocket. Player preparation and transcode retries are bounded, and obsolete responses cannot reopen a stopped or replaced player. Autoplay failures offer a button that calls `play()` on the actual audio element inside the user's gesture.
 
-For startup measurements, serve fixture responses over local HTTP and intercept
-only WebSockets. Playwright HTTP routing disables the browser cache, so a routed
-fixture cannot establish warm-cache behavior. Keep real compiled SDK code with
-explicitly modeled parent RPC delays; report those delays and distinguish
-synthetic Home/player timings from actual Discord or Jellyfin transcoding.
+The lockfile-pinned HLS dependency supplies its unchanged standalone worker at `/hls.worker.js`, with its Apache license and source map. `workerPath` selects that same-origin asset. It avoids both a webpack-rewritten stringified worker and a dependency on allowing blob workers in the iframe's security policy.
 
-Seek previews keep Jellyfin's native slider, thumbnail crop, chapter label and
-timestamp. The adapter preloads the current trickplay sheet when playback
-metadata arrives and keeps at most two decoded image nodes for the current
-item, media source and gateway capability. The loaded node becomes the native
-preview, avoiding a second request for an uncached sheet. Until decoding succeeds,
-the normal timestamp stays visible. Failed or timed-out images can retry on a
-later hover after two seconds; there is no background retry loop. A changed
-player, account or capability clears images and rejects late completions.
-The final thumbnail index is clamped to `ThumbnailCount - 1`, including a seek
-rounded to the video's duration. Chapter-only previews still use the upstream
-renderer. The gateway path supplies authentication; image URLs retain
-`MediaSourceId` and omit the redundant `ApiKey` query parameter.
+The listening-party panel shows the Discord roster and live membership changes. Rich Presence uses actual local audio playback and public Discord application artwork. Protected media addresses, gateway credentials and server identities are excluded. Discord focused, PiP and grid changes preserve the session and player. Fullscreen follows browser permissions.
 
-A metadata request with `Fields=Chapters,Trickplay` is not a sprite request:
-look specifically for `/Videos/{id}/Trickplay/{width}/{sheet}.jpg` when debugging.
-HTTP 200 and a JPEG signature alone do not establish browser rendering; verify
-decoded dimensions, native crop coordinates and visible pixels. These changes
-address loading/error behavior and the reproducible final-frame boundary. They
-do not establish the cause of a missing thumbnail that cannot be reproduced in
-the real Discord renderer.
+## Verification
 
-Jellyfin Web is GPL-2.0-or-later. The compiled output includes its license and
-source metadata; this repository includes all modifications and the repeatable
-source build. The upstream source is available at the pinned repository commit.
+`node --test native-client/test/*.test.mjs` covers ordered playback, account/session recovery, cancelled preparation, whole-book and podcast identity, autoplay unlocking, local sleep timers, storage bootstrap and document lifecycle. The workspace tests separately cover Discord, API authorization and upstream isolation.
 
-Install workspace dependencies before running
-`node --test native-client/test/*.test.mjs`; the native DOM tests use the
-workspace's `jsdom` dependency. Tests cover native dialogs and account matching,
-controller recovery and party switching, source patches, document lifecycle,
-playback permission and packaged assets. Run the real native production build to
-verify patches against the pinned upstream source. `--prepare-only` applies them
-without installing dependencies, but re-extracts the shared source tree: never
-run it concurrently with a native build.
+`scripts/native-browser-fixture.ts` serves the compiled native application with synthetic books, generated audio and the real coordinator on a private test address. Use an explicitly development-built session library for this fixture. Restore the production session bundle before packaging. This fixture does not connect to Discord, Audiobookshelf or Authentik accounts and cannot establish their live integration or physical mobile-device compatibility.
 
-Build the session library with `pnpm --filter @app/activity-web build` and copy
-`apps/activity-web/dist/` into `native-client/dist/` before local API serving. The
-Docker build packages both automatically. The complete output includes the
-early memory-storage script, the session library, native assets, HLS worker and
-licenses.
+## Licensing and corresponding source
+
+Audiobookshelf's root package declares `GPL-3.0`, and its root license is GNU GPL version 3. This build identifies that license as **GPL-3.0-only**. The upstream license and notices remain intact. The combined native client includes its license, source revision and `corresponding-source.tar.gz`, containing the patched upstream source and lockfiles while excluding installed dependencies and build output. `activity-source.tar.gz` includes the build recipe, native adapter, session library, shared protocol, broker source, manifests and lockfile from an explicit allowlist. It excludes environment files, private runtime data, installed dependencies and repository history. Extract that archive, run the build commands in the root README, and copy the built session library into the native output.
+
+The independent broker and session components retain their existing MIT license. That does not change the GPL terms for the combined native client. Public application artwork uses the bundled upstream Audiobookshelf icon; the copied Jellyfin artwork is removed.

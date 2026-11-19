@@ -25,7 +25,7 @@ const EVENT = "ACTIVITY_INSTANCE_PARTICIPANTS_UPDATE";
 const LOAD_ERROR = "Could not load everyone in this Activity. Open this list again to retry.";
 const LIVE_ERROR = "Live participant updates are unavailable. Open this list again to refresh.";
 
-/** Display data only. SDK roster membership never grants Jellyfin access. */
+/** Display data only. SDK roster membership never grants Audiobookshelf access. */
 export function mapActivityParticipants(context: ActivityDiscordContext, users: readonly DiscordParticipant[]): ActivityParticipant[] {
   const seen = new Set<string>();
   return users.filter(user => {

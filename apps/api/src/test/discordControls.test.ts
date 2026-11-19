@@ -14,7 +14,7 @@ const apps: FastifyInstance[] = [];
 
 function interaction(action: string, seconds?: number) {
   return { id: "interaction", application_id: applicationId, type: 2, guild_id: guildId,
-    channel_id: "different-text-channel", data: { name: "jellyfin", options: [
+    channel_id: "different-text-channel", data: { name: "audiobookshelf", options: [
       { name: action, ...(seconds !== undefined ? { options: [{ name: "seconds", value: seconds }] } : {}) }
     ] }
   };
@@ -42,7 +42,7 @@ async function setup() {
 
 afterEach(async () => { vi.unstubAllGlobals(); vi.restoreAllMocks(); await Promise.all(apps.splice(0).map(app => app.close())); });
 
-describe("Discord native SyncPlay controls", () => {
+describe("Discord listening party controls", () => {
   it("uses current voice and authoritative Activity membership before controlling the caller's own native session", async () => {
     const {app,viewer,find,command,upstream} = await setup();
     expect((await runControl(app,interaction("pause"),memberId)).content).toBe("Party paused.");
@@ -58,7 +58,7 @@ describe("Discord native SyncPlay controls", () => {
     upstream.mockResolvedValueOnce(Response.json({channel_id:null}));
     await expect(runControl(app,interaction("pause"),memberId)).rejects.toThrow("Join a voice channel");
     upstream.mockResolvedValueOnce(Response.json({channel_id:"other"}));
-    await expect(runControl(app,interaction("pause"),memberId)).rejects.toThrow("Open /watch");
+    await expect(runControl(app,interaction("pause"),memberId)).rejects.toThrow("Open /listen");
     expect(command).not.toHaveBeenCalled();
   });
   it("refuses a caller absent from Discord's live Activity response", async () => {
@@ -72,7 +72,7 @@ describe("Discord native SyncPlay controls", () => {
   it("requires a connected native viewer even for an Activity member", async () => {
     const {app,member,command} = await setup();
     member.mockReturnValue(undefined);
-    await expect(runControl(app,interaction("resume"),memberId)).rejects.toThrow("connect its Jellyfin player");
+    await expect(runControl(app,interaction("resume"),memberId)).rejects.toThrow("connect its Audiobookshelf player");
     expect(command).not.toHaveBeenCalled();
   });
   it("exposes collaborative seek and next-episode commands through the native service", async () => {
@@ -81,16 +81,16 @@ describe("Discord native SyncPlay controls", () => {
     expect(command).toHaveBeenCalledWith(viewer,"seek",{seconds:60});
     await runControl(app,interaction("next"),memberId);
     expect(command).toHaveBeenCalledWith(viewer,"next");
-    await expect(runControl(app,interaction("seek",-1),memberId)).rejects.toThrow("between 0 and 86400");
-    await expect(runControl(app,interaction("seek",Infinity),memberId)).rejects.toThrow("between 0 and 86400");
+    await expect(runControl(app,interaction("seek",-1),memberId)).rejects.toThrow("between 0 and 31536000");
+    await expect(runControl(app,interaction("seek",Infinity),memberId)).rejects.toThrow("between 0 and 31536000");
   });
   it("does not apply a search dropdown from a previous server/group binding", async () => {
     const {app,command} = await setup();
     const selection = {id:"selection",application_id:applicationId,type:3,guild_id:guildId,
-      data:{custom_id:"jellyfin:select:old-party",values:["a".repeat(32)]}};
-    await expect(runControl(app,selection,memberId)).rejects.toThrow("earlier watch party");
+      data:{custom_id:"audiobookshelf:select:old-party",values:["a".repeat(32)]}};
+    await expect(runControl(app,selection,memberId)).rejects.toThrow("earlier listening party");
     expect(command).not.toHaveBeenCalled();
-    selection.data.custom_id = "jellyfin:select:current-party";
+    selection.data.custom_id = "audiobookshelf:select:current-party";
     await runControl(app,selection,memberId);
     expect(command).toHaveBeenCalledWith(expect.anything(),"select",{itemIds:["a".repeat(32)]});
   });

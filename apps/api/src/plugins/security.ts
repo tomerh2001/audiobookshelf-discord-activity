@@ -36,12 +36,12 @@ export function securityPlugin(env: AppEnv): FastifyPluginAsync {
       allowList(request) {
         // Static chunks and media segments have their own ingress/capability checks;
         // they must not consume the JSON/control request budget while watching.
-        return request.routeOptions.config.jellyfinStatic === true
-          || /^\/jf\/[^/]+\/(?:Videos\/|Audio\/|Items\/[^/]+\/Images(?:\/|\?))/i.test(request.url)
+        return request.routeOptions.config.audiobookshelfStatic === true
+          || /^\/abs\/[^/]+\/(?:public\/session\/|hls\/|api\/items\/[^/]+\/(?:file|cover)(?:\/|\?|$))/i.test(request.url)
           || request.url === "/health" || request.url === "/api/health";
       },
       keyGenerator(request) {
-        const capability = /^\/jf\/([^/]+)\//.exec(request.url)?.[1];
+        const capability = /^\/abs\/([^/]+)\//.exec(request.url)?.[1];
         if (capability) return `viewer:${createHash("sha256").update(capability).digest("hex")}`;
         return request.ip;
       },

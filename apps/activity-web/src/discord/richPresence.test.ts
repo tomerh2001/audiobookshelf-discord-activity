@@ -55,9 +55,9 @@ it("fits long Unicode text without losing episode numbers or status and sanitize
   expect(formatWatchActivity({ ...episode, kind: "video", title: " \n " }, epoch).details).toBe("Video");
 });
 
-it("publishes public app artwork with no capability URLs or Jellyfin account identifiers", async () => {
+it("publishes public app artwork with no capability URLs or Audiobookshelf account identifiers", async () => {
   const { publisher, setActivity } = fixture();
-  publisher.update({ ...episode, baseUrl: "https://secret.test/jf/token", accessToken: "secret", itemId: "private-id" } as WatchSnapshot);
+  publisher.update({ ...episode, baseUrl: "https://secret.test/abs/token", accessToken: "secret", itemId: "private-id" } as WatchSnapshot);
   await tick();
   const payload = setActivity.mock.calls[0]![0];
   expect(payload.activity.assets).toEqual({ large_image: `https://cdn.discordapp.com/app-icons/1234567890/${"a".repeat(32)}.png`, large_text: "Death Note · Season 1 · Episode 7" });

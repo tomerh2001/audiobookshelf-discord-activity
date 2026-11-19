@@ -1,12 +1,13 @@
+import { randomId } from './randomId.js';
 const TICKS_PER_MS = 10_000;
-const MAX_TICKS = 7 * 86_400 * 10_000_000;
+const MAX_TICKS = 365 * 86_400 * 10_000_000;
 const COPY_QUEUE = queue => queue.map(entry => ({ ...entry }));
 
 function copy(snapshot) { return { ...snapshot, queue: COPY_QUEUE(snapshot.queue), ...(snapshot.command ? { command: { ...snapshot.command } } : {}) }; }
 function projected(snapshot, serverNow) {
     const result = copy(snapshot);
     if (!result.paused && result.index >= 0) result.positionTicks = Math.min(MAX_TICKS,
-        result.positionTicks + Math.max(0, serverNow - result.serverTimeMs) * TICKS_PER_MS);
+        result.positionTicks + Math.max(0, serverNow - result.serverTimeMs) * TICKS_PER_MS * (result.playbackRate || 1));
     result.serverTimeMs = serverNow;
     return result;
 }
@@ -18,12 +19,13 @@ function validSnapshot(value) {
         && new Set(value.queue.map(entry => entry.id)).size === value.queue.length
         && Number.isInteger(value.index) && value.index >= -1 && value.index < value.queue.length
         && Number.isFinite(value.positionTicks) && value.positionTicks >= 0 && value.positionTicks <= MAX_TICKS
+        && (value.playbackRate === undefined || (Number.isFinite(value.playbackRate) && value.playbackRate >= 0.25 && value.playbackRate <= 4))
         && typeof value.paused === 'boolean' && Number.isFinite(value.serverTimeMs)
         && ['RepeatNone', 'RepeatOne', 'RepeatAll'].includes(value.repeatMode);
 }
 
 function reduce(snapshot, operation, serverNow) {
-    const result = projected(snapshot, ['enqueue', 'setRepeatMode'].includes(operation.type) ? Math.max(snapshot.serverTimeMs, serverNow) : serverNow);
+    const result = projected(snapshot, ['enqueue', 'setRepeatMode', 'setPlaybackRate'].includes(operation.type) ? Math.max(snapshot.serverTimeMs, serverNow) : serverNow);
     switch (operation.type) {
         case 'setQueue':
             result.queue = COPY_QUEUE(operation.queue);
@@ -39,7 +41,7 @@ function reduce(snapshot, operation, serverNow) {
             break;
         case 'select': {
             const index = result.queue.findIndex(entry => entry.id === operation.queueItemId);
-            if (index < 0) throw new Error('The selected episode is no longer in this watch party.');
+            if (index < 0) throw new Error('The selected item is no longer in this listening party.');
             result.queueRevision += 1;
             result.index = index;
             result.positionTicks = operation.positionTicks;
@@ -58,19 +60,22 @@ function reduce(snapshot, operation, serverNow) {
             result.paused = true;
             result.queueRevision += 1;
             break;
+        case 'setPlaybackRate':
+            result.playbackRate = operation.playbackRate;
+            break;
         case 'setRepeatMode':
             if (result.repeatMode !== operation.repeatMode) result.queueRevision += 1;
             result.repeatMode = operation.repeatMode;
             break;
         default: throw new Error('This playback action is unavailable.');
     }
-    if (!validSnapshot(result)) throw new Error('Jellyfin returned an invalid playback selection.');
+    if (!validSnapshot(result)) throw new Error('Audiobookshelf returned an invalid playback selection.');
     return result;
 }
 
 function equivalent(a, b, serverNow) {
-    if (!a || !b || a.epoch !== b.epoch || a.index !== b.index || a.paused !== b.paused || a.repeatMode !== b.repeatMode || a.queue.length !== b.queue.length) return false;
-    if (a.queue.some((entry, index) => entry.id !== b.queue[index].id || entry.itemId !== b.queue[index].itemId)) return false;
+    if (!a || !b || a.epoch !== b.epoch || a.index !== b.index || a.paused !== b.paused || a.repeatMode !== b.repeatMode || (a.playbackRate || 1) !== (b.playbackRate || 1) || a.queue.length !== b.queue.length) return false;
+    if (a.queue.some((entry, index) => entry.id !== b.queue[index].id || entry.itemId !== b.queue[index].itemId || entry.episodeId !== b.queue[index].episodeId)) return false;
     return Math.abs(projected(a, serverNow).positionTicks - projected(b, serverNow).positionTicks) < 2_500_000;
 }
 
@@ -83,18 +88,18 @@ function retryableSnapshotError(error) {
 }
 
 const messages = {
-    activity_epoch_changed: 'This watch party changed. Reconnecting to its current playback…',
-    activity_queue_changed: 'Someone changed the queue. Following the current episode.',
-    native_item_denied: 'This selection is not available to everyone in this watch party.',
-    native_session_expired: 'Your watch party connection expired. Reconnect to continue.',
-    native_playback_denied: 'Your Jellyfin account does not have permission to play this selection.',
-    native_player_not_connected: 'The watch party is reconnecting. Try again once it is connected.',
+    activity_epoch_changed: 'This listening party changed. Reconnecting to its current playback…',
+    activity_queue_changed: 'Someone changed the queue. Following the current item.',
+    native_item_denied: 'This selection is not available to everyone in this listening party.',
+    native_session_expired: 'Your listening party connection expired. Reconnect to continue.',
+    native_playback_denied: 'Your Audiobookshelf account does not have permission to play this selection.',
+    native_player_not_connected: 'The listening party is reconnecting. Try again once it is connected.',
     activity_stale_command: 'The playback action arrived too late. Following the current party.'
 };
 
 /** One optimistic timeline, with acknowledgements that never replay a local click. */
 export function createActivityPlaybackClient({ baseUrl, apiClient, apply, onError = () => {}, transport: suppliedTransport,
-    now = () => Date.now(), newId = () => crypto.randomUUID(), setTimer = setTimeout, clearTimer = clearTimeout,
+    now = () => Date.now(), newId = () => randomId(), setTimer = setTimeout, clearTimer = clearTimeout,
     acknowledgementTimeout = 5_000 }) {
     const transport = suppliedTransport || createActivityPlaybackTransport({ baseUrl, apiClient });
     let disposed = false;
@@ -113,7 +118,7 @@ export function createActivityPlaybackClient({ baseUrl, apiClient, apply, onErro
     let connected = false;
     const pending = new Map();
     const serverNow = () => now() + offset;
-    const errorText = error => messages[error?.code] || error?.message || 'Could not synchronize playback. Reconnect to the watch party.';
+    const errorText = error => messages[error?.code] || error?.message || 'Could not synchronize playback. Reconnect to the listening party.';
 
     function effects(next, metadata) {
         if (disposed) return;
@@ -143,7 +148,7 @@ export function createActivityPlaybackClient({ baseUrl, apiClient, apply, onErro
         const snapshot = data.snapshot;
         const changedIdentity = clientId !== undefined && (clientId !== data.clientId || authoritative?.epoch !== snapshot.epoch);
         if (changedIdentity) {
-            discardPending('The watch party changed. The current playback has been restored.');
+            discardPending('The listening party changed. The current playback has been restored.');
             sequence = 0;
             processedThrough = 0;
         }
@@ -199,7 +204,7 @@ export function createActivityPlaybackClient({ baseUrl, apiClient, apply, onErro
         }
         if (!open && (wasConnected || pending.size)) {
             discardPending('Connection interrupted. Previous playback actions will not be replayed.');
-            if (authoritative) onError('Connection interrupted. Reconnecting to the watch party…');
+            if (authoritative) onError('Connection interrupted. Reconnecting to the listening party…');
         }
         if (open) recover();
     }
@@ -220,7 +225,7 @@ export function createActivityPlaybackClient({ baseUrl, apiClient, apply, onErro
         attempt(0);
     }
     function refresh(supersede = false) {
-        if (disposed) return Promise.reject(new Error('This watch party connection has closed.'));
+        if (disposed) return Promise.reject(new Error('This listening party connection has closed.'));
         if (refreshPending && !supersede) return refreshPending;
         const generation = ++refreshGeneration;
         const started = now();
@@ -234,7 +239,7 @@ export function createActivityPlaybackClient({ baseUrl, apiClient, apply, onErro
             // The timeline can be unchanged while a suspended local player lost
             // its media or an earlier episode preparation failed.
             accept(data, 'reconcile', true, supersede);
-            if (!authoritative) throw new Error('Could not read the current watch party.');
+            if (!authoritative) throw new Error('Could not read the current listening party.');
             return projected(intended, serverNow());
         }).catch(error => {
             if (disposed || generation !== refreshGeneration) return undefined;
@@ -259,7 +264,7 @@ export function createActivityPlaybackClient({ baseUrl, apiClient, apply, onErro
         }, acknowledgementTimeout);
     }
     function submit(operation, { automatic = false } = {}) {
-        if (disposed || !intended || !connected) return Promise.reject(new Error('The watch party is reconnecting. Try again once it is connected.'));
+        if (disposed || !intended || !connected) return Promise.reject(new Error('The listening party is reconnecting. Try again once it is connected.'));
         const issuedAt = serverNow();
         if (operation.type === 'setPlayback' && operation.positionTicks === undefined) {
             operation = { ...operation, positionTicks: projected(intended, issuedAt).positionTicks };
@@ -303,13 +308,13 @@ export function createActivityPlaybackClient({ baseUrl, apiClient, apply, onErro
             disposed = true;
             clearTimer(recoveryTimer);
             stopTransport?.();
-            discardPending('The watch party connection has closed.');
+            discardPending('The listening party connection has closed.');
             transport.dispose?.();
         }
     };
 }
 
-/** Reuse Jellyfin's authenticated socket, including its normal reconnect lifecycle. */
+/** Reuse Audiobookshelf's authenticated socket, including its normal reconnect lifecycle. */
 export function createActivityPlaybackTransport({ baseUrl, apiClient, fetchImpl = fetch, host = globalThis.window }) {
     const controller = new AbortController();
     return {
@@ -344,7 +349,7 @@ export function createActivityPlaybackTransport({ baseUrl, apiClient, fetchImpl 
                     credentials: 'omit', cache: 'no-store', signal: request.signal
                 });
                 if (!response.ok) {
-                    const error = new Error('Could not reconnect to the watch party.');
+                    const error = new Error('Could not reconnect to the listening party.');
                     error.statusCode = response.status;
                     error.code = (await response.json().catch(() => ({})))?.error?.code;
                     throw error;
@@ -356,7 +361,7 @@ export function createActivityPlaybackTransport({ baseUrl, apiClient, fetchImpl 
             }
         },
         send(command) {
-            if (!apiClient.isWebSocketOpen()) throw new Error('The watch party is reconnecting.');
+            if (!apiClient.isWebSocketOpen()) throw new Error('The listening party is reconnecting.');
             apiClient._sdk.webSocket.sendMessage({ MessageType: 'ActivityPlaybackCommand', Data: command });
         },
         dispose() { controller.abort(); }

@@ -1,25 +1,25 @@
 import { afterEach, expect, it, vi } from "vitest";
-import { connectAccount, getConnections, getParty, joinParty, launchNative, matchesPartyServer, deleteConnection, pollQuickConnect, saveNativeRestore } from "./native.js";
+import { connectAccount, getConnections, getParty, joinParty, launchNative, matchesPartyServer, deleteConnection, pollOidcLogin, saveNativeRestore } from "./native.js";
 import { onSessionRejected } from "./sessionRecovery.js";
 
-const connection = { id: "account", serverUrl: "https://jellyfin.test", serverId: "server", serverName: "Library", jellyfinUserId: "jf-user", jellyfinUsername: "Viewer", kind: "personal", createdAt: "2026-09-08", updatedAt: "2026-09-08" };
-const party = { id: "party", instanceId: "instance", serverId: "server", serverUrl: "https://jellyfin.test", groupId: "group" };
+const connection = { id: "account", serverUrl: "https://audiobookshelf.test", serverId: "server", serverName: "Library", audiobookshelfUserId: "jf-user", audiobookshelfUsername: "Viewer", kind: "personal", createdAt: "2026-09-08", updatedAt: "2026-09-08" };
+const party = { id: "party", instanceId: "instance", serverId: "server", serverUrl: "https://audiobookshelf.test", groupId: "group" };
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
 it("keeps the public login address separate from canonical saved-account and party matching", async () => {
   const response = {
-    connections: [{ ...connection, serverUrl: "http://jellyfin:8096" }],
-    defaultServerUrl: "https://jellyfin.example.com", canonicalDefaultServerUrl: "http://jellyfin:8096",
+    connections: [{ ...connection, serverUrl: "http://audiobookshelf:8096" }],
+    defaultServerUrl: "https://audiobookshelf.example.com", canonicalDefaultServerUrl: "http://audiobookshelf:8096",
     communityAvailable: true, preferredConnectionId: connection.id
   };
   const fetcher = vi.fn().mockResolvedValue(Response.json(response)); vi.stubGlobal("fetch", fetcher);
-  expect(await getConnections("app-token")).toEqual(response);
+  expect(await getConnections("app-token")).toEqual({ ...response, oidcEnabled: false });
   expect(fetcher).toHaveBeenCalledExactlyOnceWith("/api/connections", expect.objectContaining({
     method: "GET", headers: { Authorization: "Bearer app-token" }
   }));
 });
 
-it("sends Jellyfin credentials only in an authenticated broker POST, never its URL or a direct upstream request", async () => {
+it("sends Audiobookshelf credentials only in an authenticated broker POST, never its URL or a direct upstream request", async () => {
   const fetcher = vi.fn().mockResolvedValue(Response.json({ connection })); vi.stubGlobal("fetch", fetcher);
   const input = { serverUrl: connection.serverUrl, username: "Viewer", password: "fixture-password" };
   await expect(connectAccount("app-token", input)).resolves.toEqual(connection);
@@ -40,9 +40,9 @@ it("retains explicit party binding and requires both server identity and URL to 
 });
 
 it("rejects a native launch pointing outside the opaque same-origin gateway", async () => {
-  const launch = { baseUrl: "/jf/capability", accessToken: "capability", userId: "jf-user", serverId: "server", deviceId: "device", groupId: "group", restoreRoute: "#/search" };
+  const launch = { baseUrl: "/abs/capability", accessToken: "capability", userId: "jf-user", serverId: "server", deviceId: "device", groupId: "group", restoreRoute: "#/search" };
   const fetcher = vi.fn().mockResolvedValueOnce(Response.json(launch))
-    .mockResolvedValueOnce(Response.json({ ...launch, baseUrl: "https://untrusted.test/jf/capability" }));
+    .mockResolvedValueOnce(Response.json({ ...launch, baseUrl: "https://untrusted.test/abs/capability" }));
   vi.stubGlobal("fetch", fetcher);
   expect(await launchNative("app-token", "account", "device")).toEqual(launch);
   await expect(launchNative("app-token", "account", "device")).rejects.toThrow();
@@ -74,16 +74,16 @@ it("notifies recovery only for a rejected app session and removes the listener o
   } finally { stop(); }
 });
 
-it("encodes connection paths and honors cancellation before a Quick Connect poll", async () => {
+it("encodes connection paths and honors cancellation before a OIDC poll", async () => {
   const fetcher = vi.fn().mockResolvedValue(Response.json({ ok: true })); vi.stubGlobal("fetch", fetcher);
   await deleteConnection("app-token", "account/other");
   expect(fetcher.mock.calls[0]?.[0]).toBe("/api/connections/account%2Fother");
   const controller = new AbortController(); controller.abort();
-  await expect(pollQuickConnect("app-token", "poll", controller.signal)).rejects.toMatchObject({ name: "AbortError" });
+  await expect(pollOidcLogin("app-token", "poll", controller.signal)).rejects.toMatchObject({ name: "AbortError" });
   expect(fetcher).toHaveBeenCalledTimes(1);
 });
 
-it("surfaces ingress/bearer rejection to the native retry UI without renewing Discord or misclassifying Jellyfin login errors", async () => {
+it("surfaces ingress/bearer rejection to the native retry UI without renewing Discord or misclassifying Audiobookshelf login errors", async () => {
   const listener = vi.fn(); const stop = onSessionRejected(listener);
   const fetcher = vi.fn(); vi.stubGlobal("fetch", fetcher);
   try {
@@ -91,10 +91,10 @@ it("surfaces ingress/bearer rejection to the native retry UI without renewing Di
       fetcher.mockResolvedValueOnce(Response.json({ error: { code, message: "Connection denied." } }, { status: 401 }));
       await expect(getParty("current-session")).rejects.toMatchObject({ recoveryRequired: true });
     }
-    fetcher.mockResolvedValueOnce(Response.json({ error: { code: "jellyfin_login_failed", message: "Check your Jellyfin password." } }, { status: 401 }));
+    fetcher.mockResolvedValueOnce(Response.json({ error: { code: "audiobookshelf_login_failed", message: "Check your Audiobookshelf password." } }, { status: 401 }));
     const error = await connectAccount("current-session", { serverUrl: connection.serverUrl, username: "Viewer", password: "wrong" }).catch((value: unknown) => value);
     expect(error).toBeInstanceOf(Error);
-    expect(error).toHaveProperty("message", "Check your Jellyfin password.");
+    expect(error).toHaveProperty("message", "Check your Audiobookshelf password.");
     expect(error).not.toHaveProperty("recoveryRequired");
     expect(listener).not.toHaveBeenCalled();
   } finally { stop(); }

@@ -10,10 +10,10 @@ describe("secret file loading", () => {
     try {
       const file = path.join(directory, "password");
       writeFileSync(file, "secret\n", { mode: 0o600 });
-      const input = { JELLYFIN_SHARED_PASSWORD_FILE: file };
-      expect(loadSecretFiles(input).JELLYFIN_SHARED_PASSWORD).toBe("secret");
-      expect(input).not.toHaveProperty("JELLYFIN_SHARED_PASSWORD");
-      expect(() => loadSecretFiles({ ...input, JELLYFIN_SHARED_PASSWORD: "conflict" })).toThrow("not both");
+      const input = { AUDIOBOOKSHELF_SHARED_PASSWORD_FILE: file };
+      expect(loadSecretFiles(input).AUDIOBOOKSHELF_SHARED_PASSWORD).toBe("secret");
+      expect(input).not.toHaveProperty("AUDIOBOOKSHELF_SHARED_PASSWORD");
+      expect(() => loadSecretFiles({ ...input, AUDIOBOOKSHELF_SHARED_PASSWORD: "conflict" })).toThrow("not both");
       expect(() => loadSecretFiles({ DISCORD_BOT_TOKEN_FILE: "/sensitive/not-present" })).toThrow("Unable to load DISCORD_BOT_TOKEN_FILE.");
       expect(loadSecretFiles({ DISCORD_PROXY_EDGE_SECRET_FILE: file }).DISCORD_PROXY_EDGE_SECRET).toBe("secret");
       expect(() => loadSecretFiles({ DISCORD_PROXY_EDGE_SECRET_FILE: file, DISCORD_PROXY_EDGE_SECRET: "conflict" })).toThrow("not both");

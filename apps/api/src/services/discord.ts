@@ -155,6 +155,7 @@ export function deniedDiscordActor(env: AppEnv, userId: string): boolean {
 /** Explicit denials override both user and guild allowlists. */
 export function allowedDiscordActor(env: AppEnv, userId: string, guildId?: string): boolean {
   if (deniedDiscordActor(env, userId)) return false;
+  if (env.DISCORD_ACCESS_MODE === "public") return true;
   const parseIds = (raw: string) => raw.split(",").map((id) => id.trim()).filter(Boolean);
   const users = parseIds(env.DISCORD_ALLOWED_USER_IDS);
   const guilds = parseIds(env.DISCORD_ALLOWED_GUILD_IDS);

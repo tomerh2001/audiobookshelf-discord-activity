@@ -1,4 +1,4 @@
-/** Jellyfin also bubbles CustomEvent('pagehide') from each departing SPA view. */
+/** Only a real document exit tears down the Activity session. */
 export function onDocumentExit(host, cleanup) {
     const remove = () => host.removeEventListener('pagehide', receive);
     const receive = event => {

@@ -1,10 +1,10 @@
-import { createHash, randomBytes } from "node:crypto";
+import { randomBytes } from "node:crypto";
 import { normalizeNativeRoute, type DiscordContext } from "@app/shared";
 import type { FastifyInstance } from "fastify";
 import type { AppEnv } from "../env.js";
 import { renewActivityMembership } from "./appSession.js";
 import { sessionStore, type AppSession } from "./sessionStore.js";
-import { assertConnectionCurrent, onConnectionsRevoked, resolveConnection } from "./jellyfinConnections.js";
+import { assertConnectionCurrent, onConnectionsRevoked, resolveConnection } from "./audiobookshelfConnections.js";
 import { readUpstreamJson, upstreamFetch } from "./upstreamPolicy.js";
 import { ActivityPlaybackCoordinator } from "./activityPlayback.js";
 
@@ -40,6 +40,8 @@ export type NativeViewer = NativeIdentity & {
   itemAccess: Map<string, { until: number; sources: Set<string> }>;
   socketOpening: boolean;
   socketCleanup?: Promise<void>;
+  playbackSessions: Map<string, { itemId: string; episodeId?: string }>;
+  tokenCheckedAt: number;
 };
 export type NativePartyDependencies = {
   resolve: typeof resolveConnection;
@@ -49,7 +51,6 @@ export type NativePartyDependencies = {
 };
 type DisconnectedParty = { sessionId: string; discordUserId: string; connection: NativeConnection; at: number };
 type NavigationCheckpoint = { sessionId: string; discordUserId: string; capability: string; route: string; until: number; sequence: number };
-const CLIENT = "Jellyfin Discord Activity";
 // Keep the native queue while a renderer/popout reconnects. Socket loss still
 // detaches the viewer immediately; membership/session expiry still fail closed.
 const EMPTY_GRACE_MS = 120_000;
@@ -61,16 +62,9 @@ export class NativeError extends Error {
   constructor(readonly code: string, readonly statusCode = 403) { super(code); }
 }
 
-/** The only Jellyfin credential header emitted by this application. */
+/** Real Audiobookshelf credentials never leave the backend. */
 export function nativeAuthorization(identity: NativeIdentity): string {
-  const quote = (value: string) => value.replaceAll("\\", "\\\\").replaceAll('"', '\\"');
-  return `MediaBrowser Client="${CLIENT}", Device="Discord Activity", DeviceId="${quote(identity.deviceId)}", Version="1.0.0", Token="${quote(identity.connection.accessToken)}"`;
-}
-
-export function nativeSessionId(identity: NativeIdentity): string {
-  // Jellyfin BaseExtensions.GetMD5: UTF-16LE -> MD5 -> new Guid(bytes).ToString("N").
-  const bytes = createHash("md5").update(CLIENT + identity.deviceId, "utf16le").digest();
-  return Buffer.concat([bytes.subarray(0, 4).reverse(), bytes.subarray(4, 6).reverse(), bytes.subarray(6, 8).reverse(), bytes.subarray(8)]).toString("hex");
+  return `Bearer ${identity.connection.accessToken}`;
 }
 
 export function publicNativeParty(party: NativeParty | undefined) {
@@ -98,6 +92,7 @@ export function getNativePartyService(app: FastifyInstance): NativePartyService 
 export class NativePartyService {
   readonly playback = new ActivityPlaybackCoordinator(this);
   private readonly itemChecks = new WeakMap<NativeViewer, Map<string, Promise<{ until: number; sources: Set<string> }>>>();
+  private readonly tokenChecks = new WeakMap<NativeViewer, Promise<void>>();
   readonly parties = new Map<string, NativeParty>();
   readonly viewers = new Map<string, NativeViewer>();
   private readonly bindings = new Map<string, string>();
@@ -144,7 +139,7 @@ export class NativePartyService {
       return party.instanceId !== context.instanceId && party.guildId === context.guildId && party.channelId === context.channelId
         && party.serverId === connection.serverId && party.serverUrl === connection.serverUrl
         && viewers.length > 0 && viewers.every((viewer) => viewer.discordUserId === session.discordUserId
-          && viewer.connection.id === connection.id && viewer.connection.jellyfinUserId === connection.jellyfinUserId)
+          && viewer.connection.id === connection.id && viewer.connection.audiobookshelfUserId === connection.audiobookshelfUserId)
         && viewers.some((viewer) => viewer.sockets > 0 || viewer.socketOpening);
     });
     if (candidates.length !== 1) return;
@@ -202,7 +197,7 @@ export class NativePartyService {
       return party.instanceId !== context.instanceId && party.guildId === context.guildId && party.channelId === context.channelId
         && party.serverId === connection.serverId && party.serverUrl === connection.serverUrl
         && prior && Date.now() - prior.at <= EMPTY_GRACE_MS
-        && prior.connection.jellyfinUserId === connection.jellyfinUserId
+        && prior.connection.audiobookshelfUserId === connection.audiobookshelfUserId
         && [...party.viewers].every((cap) => {
           const viewer = this.viewers.get(cap);
           return !viewer || viewer.revoked || (!viewer.sockets && !viewer.socketOpening && viewer.lastSocketClose > 0);
@@ -254,7 +249,12 @@ export class NativePartyService {
       const connection = await this.dependencies.resolve(this.env, session.discordUserId, connectionId, session.discordContext?.guildId);
       this.dependencies.current(this.env, session.discordUserId, connection, session.discordContext?.guildId);
       const existing = this.get(session);
-      if (existing && existing.serverUrl === connection.serverUrl && existing.serverId === connection.serverId) return existing;
+      if (existing) {
+        if (existing.serverUrl === connection.serverUrl && existing.serverId === connection.serverId) return existing;
+        // A joining account cannot replace the server for everyone in the
+        // verified Discord instance. A different server needs a new Activity.
+        throw new NativeError("party_server_mismatch", 409);
+      }
       if (!existing) {
         await this.waitForRendererExit(session, connection);
         await this.verifySession(session);
@@ -262,9 +262,7 @@ export class NativePartyService {
         const restored = await this.restoreParty(session, connection);
         if (restored) return restored;
       }
-      // Resolve and authenticate the replacement before disturbing the current party.
       if (!sessionStore.getSession(session.id) || this.closed) throw new NativeError("native_session_expired", 401);
-      if (existing) await this.destroyParty(existing);
       this.dependencies.current(this.env, session.discordUserId, connection, session.discordContext?.guildId);
       if (!sessionStore.getSession(session.id) || this.closed) throw new NativeError("native_session_expired", 401);
       const context = session.discordContext!;
@@ -303,7 +301,7 @@ export class NativePartyService {
       const viewer: NativeViewer = {
         connection, deviceId, capability, partyId: party.id, appSessionId: session.id,
         discordUserId: session.discordUserId, clientDeviceId, expiresAt: session.expiresAt.getTime(),
-        lastSeen: Date.now(), sockets: 0, joined: false, revoked: false, aborters: new Set(), lastSocketClose: 0, itemAccess: new Map(), socketOpening: false
+        lastSeen: Date.now(), sockets: 0, joined: false, revoked: false, aborters: new Set(), lastSocketClose: 0, itemAccess: new Map(), socketOpening: false, playbackSessions: new Map(), tokenCheckedAt: Date.now()
       };
       this.viewers.set(capability, viewer);
       party.viewers.add(capability);
@@ -319,7 +317,7 @@ export class NativePartyService {
         checkpoint.capability = capability;
         checkpoint.sequence = 0;
       }
-      return { baseUrl: `/jf/${capability}`, accessToken: capability, userId: connection.jellyfinUserId,
+      return { baseUrl: `/abs/${capability}`, accessToken: capability, userId: connection.audiobookshelfUserId,
         serverId: connection.serverId, deviceId, groupId: party.groupId, restoreRoute };
     });
   }
@@ -360,6 +358,21 @@ export class NativePartyService {
     try { await this.dependencies.membership(this.env, session); }
     catch { await this.revoke(viewer); throw new NativeError("native_session_expired", 401); }
     if (!this.active(viewer)) throw new NativeError("native_session_expired", 401);
+    if (Date.now() - viewer.tokenCheckedAt >= 30_000) {
+      let check = this.tokenChecks.get(viewer);
+      if (!check) {
+        check = (async () => {
+          const current = await this.dependencies.resolve(this.env, viewer.discordUserId, viewer.connection.id, session.discordContext?.guildId);
+          this.dependencies.current(this.env, viewer.discordUserId, current, session.discordContext?.guildId);
+          if (!this.active(viewer) || current.audiobookshelfUserId !== viewer.connection.audiobookshelfUserId
+            || current.serverUrl !== viewer.connection.serverUrl) throw new NativeError("native_session_expired", 401);
+          viewer.connection = current;
+          viewer.tokenCheckedAt = Date.now();
+        })().finally(() => { this.tokenChecks.delete(viewer); });
+        this.tokenChecks.set(viewer, check);
+      }
+      try { await check; } catch { await this.revoke(viewer); throw new NativeError("native_session_expired", 401); }
+    }
     if (touch) viewer.lastSeen = Date.now();
     return viewer;
   }
@@ -387,6 +400,10 @@ export class NativePartyService {
     for (const abort of [...viewer.aborters]) abort();
     viewer.aborters.clear();
     this.playback.forgetViewer(viewer);
+    // Native sessions/transcodes belong to this viewer even for a shared account.
+    const sessions = [...viewer.playbackSessions.keys()];
+    viewer.playbackSessions.clear();
+    await Promise.allSettled(sessions.map((id) => this.json(viewer, "POST", `/api/session/${id}/close`, {})));
     viewer.joined = false;
   }
 
@@ -425,14 +442,14 @@ export class NativePartyService {
         method, headers: { Authorization: nativeAuthorization(identity), ...(body === undefined ? {} : { "Content-Type": "application/json" }) },
         ...(body === undefined ? {} : { body: JSON.stringify(body) }), signal: AbortSignal.timeout(15_000)
       });
-    } catch { throw new NativeError("jellyfin_unavailable", 502); }
+    } catch { throw new NativeError("audiobookshelf_unavailable", 502); }
     if (!response.ok) {
       await response.body?.cancel();
-      throw new NativeError("jellyfin_request_failed", response.status === 401 ? 401 : 502);
+      throw new NativeError("audiobookshelf_request_failed", response.status === 401 ? 401 : 502);
     }
     if (response.status === 204 || response.headers.get("content-length") === "0") return null;
     try { return await readUpstreamJson(response, 16 * 1024 * 1024); }
-    catch { throw new NativeError("jellyfin_invalid_response", 502); }
+    catch { throw new NativeError("audiobookshelf_invalid_response", 502); }
   }
 
   async execute(viewer: NativeViewer, method: string, path: string, body?: unknown): Promise<unknown> {
@@ -441,7 +458,7 @@ export class NativePartyService {
   }
 
   async requireItem(viewer: NativeViewer, itemId: string, mediaSourceId?: string): Promise<void> {
-    if (!/^[a-f0-9-]{32,36}$/i.test(itemId)) throw new NativeError("native_item_denied");
+    if (!/^[a-zA-Z0-9_-]{1,64}$/.test(itemId)) throw new NativeError("native_item_denied");
     let access = viewer.itemAccess.get(itemId);
     if (!access || access.until < Date.now()) {
       let checks = this.itemChecks.get(viewer);
@@ -451,12 +468,12 @@ export class NativePartyService {
         const ownChecks = checks;
         pending = (async () => {
           try {
-            let item: { Id?: string; MediaSources?: Array<{ Id?: string }> };
+            let item: { id?: string; media?: { tracks?: Array<{ ino?: string }> } };
             try {
-              item = await this.json(viewer, "GET", `/Users/${viewer.connection.jellyfinUserId}/Items/${itemId}?Fields=MediaSources`) as typeof item;
+              item = await this.json(viewer, "GET", `/api/items/${itemId}?expanded=1`) as typeof item;
             } catch { throw new NativeError("native_item_denied"); }
-            if (!item?.Id || item.Id.replaceAll("-", "").toLowerCase() !== itemId.replaceAll("-", "").toLowerCase()) throw new NativeError("native_item_denied");
-            const verified = { until: Date.now() + 30_000, sources: new Set([item.Id, ...(item.MediaSources ?? []).flatMap((source) => source.Id ? [source.Id] : [])]) };
+            if (!item?.id || item.id !== itemId) throw new NativeError("native_item_denied");
+            const verified = { until: Date.now() + 30_000, sources: new Set([item.id, ...(item.media?.tracks ?? []).flatMap((source) => source.ino ? [String(source.ino)] : [])]) };
             if (viewer.itemAccess.size >= 500) viewer.itemAccess.clear();
             viewer.itemAccess.set(itemId, verified);
             return verified;
@@ -505,35 +522,30 @@ export class NativePartyService {
     const party = this.parties.get(viewer.partyId)!;
     if (!viewer.joined || !viewer.sockets) throw new NativeError("native_player_not_connected", 409);
     if (action === "search") {
-      const query = new URLSearchParams({ UserId: viewer.connection.jellyfinUserId, SearchTerm: payload?.query ?? "", Recursive: "true", IncludeItemTypes: "Movie,Episode,Audio,Video", Limit: "20" });
-      return this.json(viewer, "GET", `/Items?${query}`);
+      const response = await this.json(viewer, "GET", "/api/libraries") as { libraries?: Array<{ id: string }> };
+      const books: unknown[] = [];
+      for (const library of (response.libraries ?? []).slice(0, 50)) {
+        if (!/^[a-zA-Z0-9_-]{1,64}$/.test(library.id)) continue;
+        const query = new URLSearchParams({ q: payload?.query ?? "", limit: "20" });
+        const result = await this.json(viewer, "GET", `/api/libraries/${library.id}/search?${query}`) as { book?: Array<{ libraryItem?: unknown }> };
+        books.push(...(result.book ?? []).flatMap((entry) => entry.libraryItem ? [entry.libraryItem] : []));
+        if (books.length >= 25) break;
+      }
+      return { items: books.slice(0, 25) };
     }
     if (action === "now") {
       const { snapshot } = await this.playback.get(viewer);
       const itemId = snapshot.queue[snapshot.index]?.itemId;
-      const item = itemId ? await this.json(viewer, "GET", `/Users/${viewer.connection.jellyfinUserId}/Items/${itemId}`) as { Name?: string } : undefined;
-      return { itemId, title: item?.Name, positionSeconds: snapshot.positionTicks / 10_000_000, isPaused: snapshot.paused, groupId: party.groupId };
+      const item = itemId ? await this.json(viewer, "GET", `/api/items/${itemId}`) as { media?: { metadata?: { title?: string } } } : undefined;
+      return { itemId, title: item?.media?.metadata?.title, positionSeconds: snapshot.positionTicks / 10_000_000,
+        isPaused: snapshot.paused, playbackRate: snapshot.playbackRate, groupId: party.groupId };
     }
     if (action === "seek") {
       if (!Number.isFinite(payload?.seconds) || payload!.seconds! < 0) throw new NativeError("invalid_position", 400);
       return this.playback.control(viewer, (snapshot) => ({ type: "seek", positionTicks: Math.round(payload!.seconds! * 10_000_000), paused: snapshot.paused }));
     }
     if (action === "queue" || action === "select") {
-      let ids = payload?.itemIds ?? [];
-      if (action === "select" && ids.length === 1) {
-        await this.requireItem(viewer, ids[0]!);
-        const item = await this.json(viewer, "GET", `/Users/${viewer.connection.jellyfinUserId}/Items/${ids[0]}`) as { Type?: string; SeriesId?: string };
-        // Match native Web's episode playback expansion so Discord-started episodes
-        // retain the same Next/Previous queue controls as a library selection.
-        if (item.Type === "Episode" && /^[a-f0-9-]{32,36}$/i.test(item.SeriesId ?? "")) {
-          const query = new URLSearchParams({ UserId: viewer.connection.jellyfinUserId, IsVirtualUnaired: "false",
-            IsMissing: "false", Limit: "100", StartItemId: ids[0]! });
-          const result = await this.json(viewer, "GET", `/Shows/${item.SeriesId}/Episodes?${query}`) as { Items?: Array<{ Id?: string }> };
-          const episodes = (result.Items ?? []).flatMap((entry) => entry.Id && /^[a-f0-9-]{32,36}$/i.test(entry.Id) ? [entry.Id] : []);
-          const start = episodes.indexOf(ids[0]!);
-          if (start >= 0) ids = episodes.slice(start);
-        }
-      }
+      const ids = payload?.itemIds ?? [];
       if (!ids.length) throw new NativeError("native_queue_empty", 400);
       const queue = ids.map((itemId) => ({ id: randomBytes(16).toString("hex"), itemId }));
       return this.playback.control(viewer, () => action === "queue" ? { type: "enqueue", queue }
@@ -547,13 +559,6 @@ export class NativePartyService {
       });
     }
     return this.playback.control(viewer, () => action === "stop" ? { type: "stop" } : { type: "setPlayback", paused: action === "pause" });
-  }
-
-  observeMessage(viewer: NativeViewer, message: unknown): boolean {
-    if (!message || typeof message !== "object" || !this.parties.has(viewer.partyId)) return false;
-    const event = message as { MessageType?: string };
-    // Upstream SyncPlay must never become a second playback authority.
-    return ["ForceKeepAlive", "KeepAlive", "UserDataChanged", "LibraryChanged", "ServerRestarting", "ServerShuttingDown"].includes(event.MessageType ?? "");
   }
 
   async sweep(): Promise<void> {

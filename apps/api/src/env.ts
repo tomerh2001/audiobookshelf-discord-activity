@@ -24,6 +24,7 @@ export const envSchema = z.object({
   DISCORD_REQUIRE_PROXY_AUTH: booleanFromString.default(false),
   DISCORD_PROXY_AUTH_MODE: z.enum(["signature", "cloudflare-worker"]).default("signature"),
   DISCORD_PROXY_EDGE_SECRET: z.string().default(""),
+  DISCORD_ACCESS_MODE: z.enum(["restricted", "public"]).default("restricted"),
   DISCORD_ALLOWED_GUILD_IDS: z.string().default(""),
   DISCORD_ALLOWED_USER_IDS: z.string().default(""),
   DISCORD_DENIED_USER_IDS: z.string().default(""),
@@ -34,13 +35,16 @@ export const envSchema = z.object({
   DEV_AUTH_MOCK: booleanFromString.default(false),
   TOKEN_ENCRYPTION_KEY: z.string().default(""),
   DATABASE_URL: z.string().default("file:/data/app.db"),
-  JELLYFIN_DEFAULT_SERVER_URL: z.string().url().default("http://localhost:8096"),
+  AUDIOBOOKSHELF_DEFAULT_SERVER_URL: z.string().url().default("http://localhost:13378"),
   // An exact user-facing alias for the approved default, never another upstream.
-  JELLYFIN_PUBLIC_SERVER_URL: z.union([z.literal(""), z.url({ protocol: /^https$/ })]).default(""),
-  JELLYFIN_ALLOW_CUSTOM_SERVERS: booleanFromString.default(true),
-  JELLYFIN_AUTH_MODE: z.enum(["per-user", "shared"]).default("per-user"),
-  JELLYFIN_SHARED_USERNAME: z.string().default(""),
-  JELLYFIN_SHARED_PASSWORD: z.string().default(""),
+  AUDIOBOOKSHELF_PUBLIC_SERVER_URL: z.union([z.literal(""), z.url({ protocol: /^https$/ })]).default(""),
+  AUDIOBOOKSHELF_ALLOW_CUSTOM_SERVERS: booleanFromString.default(true),
+  AUDIOBOOKSHELF_AUTH_MODE: z.enum(["per-user", "shared"]).default("per-user"),
+  AUDIOBOOKSHELF_COMMUNITY_ACCESS: z.enum(["guilds", "public"]).default("guilds"),
+  AUDIOBOOKSHELF_COMMUNITY_GUILD_IDS: z.string().default(""),
+  AUDIOBOOKSHELF_OIDC_ENABLED: booleanFromString.default(true),
+  AUDIOBOOKSHELF_SHARED_USERNAME: z.string().default(""),
+  AUDIOBOOKSHELF_SHARED_PASSWORD: z.string().default(""),
   ROOM_MAX_PARTICIPANTS: z.coerce.number().int().positive().default(20),
   RATE_LIMIT_MAX: z.coerce.number().int().positive().default(300),
   RATE_LIMIT_WINDOW: z.string().default("1 minute"),
@@ -70,15 +74,18 @@ export function loadEnv(input: NodeJS.ProcessEnv = process.env): AppEnv {
       problems.push("TOKEN_ENCRYPTION_KEY must encode a random 32-byte key in base64");
     }
     const ids = `${env.DISCORD_ALLOWED_GUILD_IDS},${env.DISCORD_ALLOWED_USER_IDS}`.split(",").map((id) => id.trim()).filter(Boolean);
-    if (!ids.length || ids.some((id) => !/^\d{17,20}$/.test(id))) {
+    if ((env.DISCORD_ACCESS_MODE === "restricted" && !ids.length) || ids.some((id) => !/^\d{17,20}$/.test(id))) {
       problems.push("Set DISCORD_ALLOWED_GUILD_IDS and/or DISCORD_ALLOWED_USER_IDS to valid Discord IDs");
     }
     if (env.DISCORD_DENIED_USER_IDS.split(",").map((id) => id.trim()).filter(Boolean).some((id) => !/^\d{17,20}$/.test(id))) {
       problems.push("DISCORD_DENIED_USER_IDS must contain valid Discord IDs");
     }
+    if (env.AUDIOBOOKSHELF_COMMUNITY_GUILD_IDS.split(",").map((id) => id.trim()).filter(Boolean).some((id) => !/^\d{17,20}$/.test(id))) {
+      problems.push("AUDIOBOOKSHELF_COMMUNITY_GUILD_IDS must contain valid Discord IDs");
+    }
     if (!env.PUBLIC_BASE_URL.startsWith("https://")) problems.push("PUBLIC_BASE_URL must use HTTPS");
-    if (env.JELLYFIN_AUTH_MODE === "shared" && (!env.JELLYFIN_SHARED_USERNAME || !env.JELLYFIN_SHARED_PASSWORD)) {
-      problems.push("Shared Jellyfin username and password must be configured");
+    if (env.AUDIOBOOKSHELF_AUTH_MODE === "shared" && (!env.AUDIOBOOKSHELF_SHARED_USERNAME || !env.AUDIOBOOKSHELF_SHARED_PASSWORD)) {
+      problems.push("Shared Audiobookshelf username and password must be configured");
     }
     if (problems.length) throw new Error(`Invalid production configuration: ${problems.join("; ")}`);
   }

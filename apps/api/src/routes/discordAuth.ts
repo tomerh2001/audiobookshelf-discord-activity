@@ -11,7 +11,7 @@ import { createAppSession, getBearerToken } from "../services/appSession.js";
 import { DiscordActivityError, DiscordOAuthError, allowedDiscordActor, exchangeDiscordCode, getDiscordCurrentUser, verifyDiscordActivityContext, verifyDiscordAuthorization } from "../services/discord.js";
 import { sessionStore } from "../services/sessionStore.js";
 import { AuthError, getAppSessionUser, requireAppSession, sendAuthError } from "../plugins/auth.js";
-import { JellyfinConnectionStore } from "../services/jellyfinConnections.js";
+import { AudiobookshelfConnectionStore } from "../services/audiobookshelfConnections.js";
 import { getNativePartyService } from "../services/nativeParty.js";
 
 export const discordAuthRoutes: FastifyPluginAsync = async (app) => {
@@ -114,10 +114,10 @@ export const discordAuthRoutes: FastifyPluginAsync = async (app) => {
         return reply.code(401).send(apiError("invalid_app_token", "Invalid or expired app token."));
       }
 
-      const connections = new JellyfinConnectionStore(app.envConfig).list(session.discordUserId, session.discordContext?.guildId);
+      const connections = new AudiobookshelfConnectionStore(app.envConfig).list(session.discordUserId, session.discordContext?.guildId);
       const response = meResponseSchema.parse({
         discordUser: user,
-        jellyfinLinked: connections.length > 0,
+        audiobookshelfLinked: connections.length > 0,
         ...(session.discordContext ? { discordContext: session.discordContext } : {}),
         appSessionExpiresAt: session.expiresAt.toISOString()
       });

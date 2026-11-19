@@ -1,516 +1,106 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { createNativePlaybackAdapter } from '../src/nativePlaybackAdapter.js';
-import { createActivityPlaybackClient } from '../src/activityPlaybackClient.js';
-import { PLAYBACK_BLOCKED_EVENT } from '../src/playbackPermission.js';
-
-const tick = () => new Promise(resolve => setImmediate(resolve));
-const deferred = () => { let resolve; const promise = new Promise(done => { resolve = done; }); return { promise, resolve }; };
-
-async function fixture() {
-    const effects = []; const commands = []; const errors = []; const prepared = []; const intents = []; const eventHandlers = new Map();
-    const domHandlers = new Map(); const intervals = new Map(); const timers = new Map();
-    let at = Date.now(); let id = 0; let active = false; let paused = true; let ticks = 0; let rate = 1;
-    let receiver; let core; let applyState; let nativeQueue = []; let currentId; let repeat = 'RepeatNone';
-    let ranges = [{ start: 0, end: 10_000_000_000 }];
-    const events = {
-        on(target, event, callback) {
-            const handlers = eventHandlers.get(target) || new Map(); eventHandlers.set(target, handlers);
-            handlers.set(event, [...handlers.get(event) || [], callback]);
+import { createRequire } from 'node:module';
+import { createNativePlayer } from '../src/nativePlaybackAdapter.js';
+const { JSDOM } = createRequire(new URL('../../apps/activity-web/package.json', import.meta.url))('jsdom');
+const flush = () => new Promise(resolve => setImmediate(resolve));
+function fixture({ getItem, finished = false } = {}) {
+    const { window } = new JSDOM('<body></body>', { url: 'https://activity.example/' });
+    const previous = { window: globalThis.window, document: globalThis.document, fetch: globalThis.fetch };
+    globalThis.window = window; globalThis.document = window.document;
+    let state = { epoch: 'party', revision: 0, queueRevision: 0, queue: [], index: -1, positionTicks: 0, paused: true, playbackRate: 1, repeatMode: 'RepeatNone', serverTimeMs: Date.now() };
+    const events = [], commands = [], loads = [], errors = [], blocked = [];
+    let listener;
+    const handlers = { getCurrentTime: () => handlers.time, getDuration: () => 120, time: 0, playerState: 'PLAYING', playerPlaying: false, libraryItemId: null, episodeId: null,
+        closePlayer() { handlers.libraryItemId = null; handlers.libraryItem = null; handlers.player = null; },
+        load(item, episodeId, playing, rate, time) {
+            loads.push({ item, episodeId, playing, rate, time });
+            handlers.libraryItemId = item.id; handlers.libraryItem = item; handlers.episodeId = episodeId; handlers.time = time;
+            const audio = window.document.createElement('audio'); window.document.body.append(audio);
+            Object.defineProperty(audio, 'readyState', { value: 4 });
+            audio.play = () => { events.push('element-play'); return Promise.resolve(); };
+            handlers.player = { player: audio, currentTrack: { startOffset: 60 } }; handlers.playerPlaying = playing;
         },
-        off(target, event, callback) { const handlers = eventHandlers.get(target); if (handlers) handlers.set(event, (handlers.get(event) || []).filter(fn => fn !== callback)); },
-        trigger(target, event, args = []) { for (const callback of eventHandlers.get(target)?.get(event) || []) callback({ type: event }, ...args); }
+        seek(time) { handlers.time = time; events.push(`seek:${time}`); },
+        play() { events.push('play'); handlers.playerPlaying = true; },
+        pause() { events.push('pause'); handlers.playerPlaying = false; },
+        setPlaybackRate(rate) { handlers.rate = rate; events.push(`rate:${rate}`); }
     };
-    const queue = {
-        getPlaylist: () => nativeQueue.slice(), setPlaylist: values => { nativeQueue = values.slice(); repeat = 'RepeatNone'; },
-        getRepeatMode: () => repeat, setRepeatMode: value => { repeat = value; }, setPlaylistState: value => { currentId = value; }
-    };
-    const player = { getPlaybackRate: () => rate, setPlaybackRate: value => { rate = value; effects.push(['rate', value]); } };
-    const manager = {
-        _playQueueManager: queue, getCurrentPlayer: () => active ? player : undefined,
-        getCurrentTicks: () => ticks, paused: () => paused, getRepeatMode: () => repeat,
-        getBufferedRanges: () => ranges,
-        setRepeatMode(value) { repeat = value; effects.push(['repeat', value]); },
-        getItemsForPlayback: async (_server, { Ids }) => ({ Items: Ids.split(',').map(Id => ({ Id, ServerId: 'server', MediaType: 'Video' })) }),
-        pause() { paused = true; effects.push(['pause']); events.trigger(player, 'pause'); },
-        unpause() { paused = false; effects.push(['unpause']); events.trigger(player, 'unpause'); },
-        seek(value) { ticks = value; effects.push(['seek', value]); },
-        stop() { active = false; paused = true; effects.push(['stop']); return Promise.resolve(); },
-        playPause() {}, nextTrack() {}, previousTrack() {}, setCurrentPlaylistItem() {}, clearQueue() {}, removeFromPlaylist() {}, movePlaylistItem() {},
-        setQueueShuffleMode() { nativeQueue.reverse(); }, toggleQueueShuffleMode() { nativeQueue.reverse(); },
-        setVolume(value) { effects.push(['volume', value]); },
-        activityPlayPrepared(values, options) {
-            effects.push(['prepare', values[options.startIndex].Id]);
-            const pending = deferred(); prepared.push({ ...pending, values, options });
-            return pending.promise.then(() => {
-                if (!options.activityIsCurrent()) return;
-                active = true; paused = false; ticks = options.startPositionTicks;
-                queue.setPlaylist(values); queue.setPlaylistState(values[options.startIndex].PlaylistItemId);
-                events.trigger(manager, 'playerchange');
-                effects.push(['started', values[options.startIndex].Id]);
-            });
-        }
-    };
-    const originalPause = manager.pause;
-    const initial = { epoch: 'party', revision: 0, queueRevision: 0, queue: [], index: -1, positionTicks: 0, paused: true, repeatMode: 'RepeatNone', serverTimeMs: at };
-    const host = { crypto: { randomUUID: () => `entry-${++id}` }, document: {
-        addEventListener: (event, callback) => domHandlers.set(event, callback), removeEventListener: event => domHandlers.delete(event)
-    }, setInterval: callback => { const value = ++id; intervals.set(value, callback); return value; }, clearInterval: value => intervals.delete(value) };
-    const adapter = createNativePlaybackAdapter({ playbackManager: manager, events, apiClient: { serverId: () => 'server' }, baseUrl: '/jf/cap',
-        onError: value => errors.push(value), host, now: () => at,
-        createClient(options) {
-            applyState = options.apply;
-            core = createActivityPlaybackClient({ ...options, now: () => at, newId: () => `command-${++id}`,
-                setTimer: callback => { const value = ++id; timers.set(value, callback); return value; }, clearTimer: value => timers.delete(value),
-                transport: { snapshot: async () => ({ snapshot: initial, clientId: 'local' }), isConnected: () => true,
-                    subscribe(callback) { receiver = callback; return () => {}; },
-                    send(command) { effects.push(['send', command.type]); commands.push(command); }
-                }
-            });
-            return { ...core, submit(operation, options) { intents.push({ operation, options }); return core.submit(operation, options); } };
-        }
-    });
-    await adapter.start();
-    const begin = (ids = ['one', 'two', 'three']) => {
-        void manager.activityPlayback.playPrepared(ids.map(Id => ({ Id, ServerId: 'server', MediaType: 'Video' })), { startIndex: 0 });
-        return prepared.at(-1);
-    };
-    const start = async ids => { const pending = begin(ids); pending.resolve(); await tick(); return pending; };
-    const ack = () => {
-        const state = core.getSnapshot(); const command = commands.at(-1);
-        receiver({ snapshot: { ...state, revision: command.sequence, command: { id: command.id, sequence: command.sequence, clientId: 'local' } },
-            clientId: 'local', ack: { id: command.id } });
-    };
-    return { manager, adapter, commands, effects, errors, prepared, intents, player, events, domHandlers, intervals, timers, originalPause,
-        begin, start, ack, core, get currentId() { return currentId; }, get paused() { return paused; }, get ticks() { return ticks; },
-        setTicks(value) { ticks = value; }, setBufferedRanges(value) { ranges = value; },
-        physicalPause(value) { paused = value; events.trigger(player, value ? 'pause' : 'unpause'); },
-        advance(milliseconds) { at += milliseconds; },
-        reconcile(metadata) { applyState(core.getSnapshot(), metadata); },
-        remote(state) { receiver({ snapshot: { ...core.getSnapshot(), ...state, revision: 100, serverTimeMs: at }, clientId: 'local' }); },
-        runInterval() { for (const callback of intervals.values()) callback(); }
-    };
+    const store = { state: { playerQueueItems: [] }, getters: { 'user/getUserMediaProgress': () => ({ currentTime: 20, isFinished: finished }), 'libraries/getBookCoverAspectRatio': 1 },
+        commit(type, payload) { if (type === 'setMediaPlaying') store.state.playerQueueItems = payload?.queueItems || []; if (type === 'setPlayerQueueItems') store.state.playerQueueItems = payload; }, subscribe() { return () => {}; } };
+    const socket = { isWebSocketOpen: () => true, subscribe(_types, callback) { listener = callback; return () => {}; }, _sdk: { webSocket: { onStatusChange: () => () => {}, sendMessage({ Data: command }) {
+        events.push('send'); commands.push(command); state = { ...state, revision: state.revision + 1, command: { ...command, clientId: 'viewer' }, serverTimeMs: Date.now() };
+        if (command.type === 'setQueue') { state.queue = command.queue; state.index = command.index; state.positionTicks = command.positionTicks; state.paused = command.paused; state.queueRevision++; }
+        if (command.type === 'setPlayback') { state.paused = command.paused; state.positionTicks = command.positionTicks; }
+        if (command.type === 'seek') { state.positionTicks = command.positionTicks; state.paused = command.paused; }
+        if (command.type === 'setPlaybackRate') state.playbackRate = command.playbackRate;
+        if (command.type === 'stop') { state.queue = []; state.index = -1; state.paused = true; state.positionTicks = 0; state.queueRevision++; }
+        listener({ MessageType: 'ActivityPlaybackState', Data: { snapshot: state, clientId: 'viewer', sequence: command.sequence, ack: command.id } });
+    } } } };
+    globalThis.fetch = async () => ({ ok: true, json: async () => ({ snapshot: state, clientId: 'viewer', sequence: 0 }) });
+    const component = { playerHandler: handlers, $store: store, $refs: { audioPlayer: { checkUpdateChapterTrack() {} } }, $nextTick: callback => callback(), $axios: { $get: getItem || (async path => ({ id: path.split('/')[3].split('?')[0], media: { metadata: { title: 'Book' }, episodes: [{ id: 'ep-1' }] } })) } };
+    const adapter = createNativePlayer({ component, socket, baseUrl: '/abs/fixture', onError: value => errors.push(value), onBlocked: value => blocked.push(value) });
+    return { adapter, commands, events, loads, handlers, errors, blocked, window,
+        close() { adapter.dispose(); window.close(); Object.assign(globalThis, previous); } };
 }
-
-test('native prepared queue starts before sending and immediate local pause/seek/play never wait for acknowledgements', async () => {
-    const f = await fixture();
-    const pending = f.begin();
-    assert.deepEqual(f.effects.slice(0, 2), [['prepare', 'one'], ['send', 'setQueue']]);
-    pending.resolve(); await tick();
-    const before = f.effects.length;
-    void f.manager.pause();
-    assert.equal(f.paused, true);
-    assert.deepEqual(f.effects.slice(before, before + 2), [['pause'], ['send', 'setPlayback']]);
-    void f.manager.seek(40_000_000);
-    assert.equal(f.ticks, 40_000_000);
-    assert.equal(f.paused, true, 'seeking a paused party stays paused');
-    void f.manager.playPause(); assert.equal(f.paused, false);
-    void f.manager.playPause(); assert.equal(f.paused, true, 'a second click uses current local intent before any response');
-    assert.equal(f.prepared.length, 1);
-    f.ack(); await tick();
-    assert.equal(f.prepared.length, 1, 'own acknowledgement cannot restart the video');
-    f.adapter.dispose();
+test('native selection uses whole-book resume time and every viewer can immediately pause, seek and change speed', async () => {
+    const f = fixture();
+    try {
+        await f.adapter.start(); await f.adapter.playSelection({ libraryItemId: 'book-one' }); await flush();
+        assert.equal(f.loads[0].time, 20); assert.equal(f.loads[0].item.id, 'book-one');
+        f.events.length = 0; await f.adapter.pause();
+        assert.ok(f.events.indexOf('pause') < f.events.indexOf('send'));
+        await f.adapter.seek(75); assert.equal(f.handlers.time, 75); assert.equal(f.commands.at(-1).positionTicks, 750000000);
+        await f.adapter.rate(1.5); assert.equal(f.handlers.rate, 1.5); assert.equal(f.commands.at(-1).type, 'setPlaybackRate');
+    } finally { f.close(); }
 });
-
-test('Play on a locally paused device resumes immediately without pausing or rewinding a playing party', async () => {
-    for (const control of ['playPause', 'unpause']) {
-        const f = await fixture(); await f.start(); f.ack();
-        f.advance(10_000); f.physicalPause(true);
+test('late item fetch cannot reopen audio after Stop or account disposal', async () => {
+    let resolve;
+    const f = fixture({ getItem: () => new Promise(done => { resolve = done; }) });
+    try {
+        await f.adapter.start(); await f.adapter.playSelection({ libraryItemId: 'book-one' });
+        await f.adapter.stop(); resolve({ id: 'book-one', media: {} }); await flush();
+        assert.equal(f.loads.length, 0);
+    } finally { f.close(); }
+});
+test('podcast episode identity survives the shared queue and native player call', async () => {
+    const f = fixture();
+    try {
+        await f.adapter.start(); await f.adapter.playSelection({ libraryItemId: 'podcast-one', episodeId: 'ep-1', startTime: 8 }); await flush();
+        assert.equal(f.commands[0].queue[0].episodeId, 'ep-1'); assert.equal(f.loads[0].episodeId, 'ep-1'); assert.equal(f.loads[0].time, 8);
+    } finally { f.close(); }
+});
+test('autoplay unlock acts on the exact media element and preserves a shared pause', async () => {
+    const f = fixture();
+    try {
+        await f.adapter.start(); await f.adapter.playSelection({ libraryItemId: 'book-one' }); await flush(); await f.adapter.pause();
+        f.handlers.player.player.dispatchEvent(new f.window.Event('audiobookshelf-activity-playback-blocked', { bubbles: true }));
+        assert.equal(f.blocked.at(-1), true);
         const count = f.commands.length;
-        void f.manager[control]();
-        assert.equal(f.paused, false, `${control} resumes the actual player within the click`);
-        assert.equal(f.commands.length, count, 'personal recovery does not broadcast playback intent');
-        assert.equal(f.core.getSnapshot().paused, false);
-        assert.equal(f.core.getSnapshot().positionTicks, 100_000_000, 'other viewers keep their current position');
-        void f.manager.playPause();
-        assert.equal(f.commands.at(-1).paused, true, 'a playing device still pauses the party normally');
-        f.adapter.dispose();
-    }
+        f.adapter.unlock(); assert.equal(f.events.at(-1), 'element-play'); await flush();
+        assert.equal(f.handlers.playerPlaying, false); assert.equal(f.commands.length, count);
+    } finally { f.close(); }
+});
+test('a personal sleep timer pauses only the local player and does not broadcast a group pause', async () => {
+    const f = fixture();
+    try { await f.adapter.start(); await f.adapter.playSelection({ libraryItemId: 'book-one' }); await flush(); const count = f.commands.length; f.adapter.localPause(); assert.equal(f.handlers.playerPlaying, false); assert.equal(f.commands.length, count); }
+    finally { f.close(); }
 });
 
-test('buffer recovery does not seek into unloaded video or consume a shallow buffer with rate correction', async () => {
-    const f = await fixture(); await f.start(); f.ack();
-    f.setTicks(100_000_000); f.setBufferedRanges([{ start: 100_000_000, end: 115_000_000 }]);
-    f.advance(20_000); f.events.trigger(f.player, 'waiting');
-    const before = f.effects.length;
-    f.events.trigger(f.player, 'playing');
-    for (let index = 0; index < 10; index++) {
-        f.advance(1000); f.runInterval();
-    }
-    assert.deepEqual(f.effects.slice(before), [], 'the ready player keeps its downloaded video while the connection recovers');
-    f.setBufferedRanges([{ start: 100_000_000, end: 400_000_000 }]);
-    f.runInterval();
-    assert.deepEqual(f.effects.at(-1), ['seek', 300_000_000], 'once its target has headroom, the device catches up');
-    assert.equal(f.commands.length, 1, 'buffer recovery never issues a shared control');
-    f.adapter.dispose();
+test('finished audiobooks restart at zero unless a deliberate start position is supplied', async () => {
+    const f = fixture({ finished: true });
+    try { await f.adapter.start(); await f.adapter.playSelection({ libraryItemId: 'finished-book' }); await flush(); assert.equal(f.loads[0].time, 0); }
+    finally { f.close(); }
 });
-
-test('a recovering stream plays continuously before drift correction and preserves explicit seek controls', async () => {
-    const f = await fixture(); await f.start(); f.ack();
-    f.advance(5000); f.events.trigger(f.player, 'waiting');
-    const before = f.effects.length;
-    f.events.trigger(f.player, 'playing');
-    f.advance(1000); f.runInterval();
-    assert.deepEqual(f.effects.slice(before), [], 'a playing event alone cannot prove stable recovery');
-    f.advance(2000); f.runInterval();
-    assert.deepEqual(f.effects.at(-1), ['seek', 80_000_000]);
-    f.events.trigger(f.player, 'waiting'); f.setBufferedRanges([]);
-    void f.manager.seek(500_000_000);
-    assert.equal(f.ticks, 500_000_000, 'a deliberate seek bypasses drift guards');
-    f.adapter.dispose();
-});
-
-test('a blocked player keeps one permission attempt until a direct Play gesture retries it', async () => {
-    const f = await fixture(); await f.start(); f.ack(); f.physicalPause(true);
-    const media = { matches: selector => selector.includes('video.htmlvideoplayer') };
-    f.domHandlers.get(PLAYBACK_BLOCKED_EVENT)?.({ target: media });
-    const before = f.effects.length;
-    for (let index = 0; index < 5; index++) { f.advance(1000); f.runInterval(); }
-    assert.deepEqual(f.effects.slice(before), [], 'timer retries cannot reset a pending mobile permission prompt');
-    void f.manager.playPause();
-    assert.equal(f.paused, false);
-    assert.equal(f.commands.length, 1);
-    f.adapter.dispose();
-});
-
-test('explicit remote seeks and resuming the Activity catch up once even outside the downloaded range', async () => {
-    for (const metadata of [{ origin: 'remote', type: 'seek' }, { origin: 'reconcile', resumed: true }]) {
-        const f = await fixture(); await f.start(); f.ack();
-        f.advance(60_000); f.setBufferedRanges([{ start: 0, end: 20_000_000 }]);
-        const before = f.effects.length;
-        f.reconcile(metadata);
-        assert.deepEqual(f.effects.slice(before), [['seek', 600_000_000]], 'intentional recovery can load the current party position');
-        f.events.trigger(f.player, 'waiting'); f.advance(5000); f.events.trigger(f.player, 'playing');
-        for (let index = 0; index < 10; index++) { f.advance(1000); f.runInterval(); }
-        assert.equal(f.effects.slice(before).filter(effect => effect[0] === 'seek').length, 1, 'ordinary recovery cannot repeat that unloaded seek');
-        assert.equal(f.commands.length, 1);
-        f.adapter.dispose();
-    }
-});
-
-test('a burst of mobile resume events cannot restart an unbuffered catch-up before it loads', async () => {
-    const f = await fixture(); await f.start(); f.ack();
-    f.advance(60_000); f.setBufferedRanges([]);
-    const before = f.effects.length;
-    f.reconcile({ origin: 'reconcile', resumed: true });
-    f.events.trigger(f.player, 'waiting'); f.setTicks(0);
-    for (let index = 0; index < 2; index++) { f.advance(100); f.reconcile({ origin: 'reconcile', resumed: true }); }
-    assert.equal(f.effects.slice(before).filter(effect => effect[0] === 'seek').length, 1);
-    f.adapter.dispose();
-});
-
-test('a transient episode preparation failure retries the same current episode without another party command', async () => {
-    const f = await fixture(); let calls = 0;
-    f.manager.getItemsForPlayback = async () => {
-        if (++calls === 1) throw new Error('Temporary connection failure');
-        return { Items: [{ Id: 'episode', ServerId: 'server', MediaType: 'Video' }] };
-    };
-    f.remote({ queue: [{ id: 'entry', itemId: 'episode' }], index: 0, paused: false, queueRevision: 1 });
-    await tick(); assert.equal(calls, 1); assert.equal(f.prepared.length, 0);
-    f.advance(4999); f.runInterval(); await tick(); assert.equal(calls, 1);
-    f.advance(1); f.runInterval(); await tick(); assert.equal(calls, 2);
-    f.prepared.at(-1).resolve(); await tick();
-    assert.equal(f.currentId, 'entry');
-    f.advance(30_000); f.runInterval(); await tick(); assert.equal(calls, 2);
-    assert.equal(f.commands.length, 0);
-    f.adapter.dispose();
-});
-
-test('automatic preparation retries are bounded and policy blocks wait for a gesture', async () => {
-    for (const policyBlocked of [false, true]) {
-        const f = await fixture(); let calls = 0;
-        f.manager.getItemsForPlayback = async () => {
-            calls++;
-            if (policyBlocked) throw new DOMException('Gesture required', 'NotAllowedError');
-            throw new Error('Connection unavailable');
-        };
-        f.remote({ queue: [{ id: 'entry', itemId: 'episode' }], index: 0, paused: false, queueRevision: 1 });
-        await tick();
-        for (const duration of [5000, 10_000, 20_000, 60_000, 60_000]) { f.advance(duration); f.runInterval(); await tick(); }
-        assert.equal(calls, policyBlocked ? 1 : 4, 'retrying cannot become an endless loading loop');
-        f.adapter.dispose();
-    }
-});
-
-test('Stop cancels a scheduled episode preparation retry', async () => {
-    const f = await fixture(); let calls = 0;
-    f.manager.getItemsForPlayback = async () => { calls++; throw new Error('Temporary connection failure'); };
-    f.remote({ queue: [{ id: 'entry', itemId: 'episode' }], index: 0, paused: false, queueRevision: 1 });
-    await tick(); void f.manager.stop();
-    f.advance(10_000); f.runInterval(); await tick();
-    assert.equal(calls, 1); assert.equal(f.prepared.length, 0);
-    f.adapter.dispose();
-});
-
-test('rapid next/previous commands prepare the latest explicit queue entry and stale completions cannot replace it', async () => {
-    const f = await fixture(); await f.start();
-    void f.manager.nextTrack(); const second = f.prepared.at(-1);
-    void f.manager.nextTrack(); const third = f.prepared.at(-1);
-    assert.equal(second.values[second.options.startIndex].Id, 'two');
-    assert.equal(third.values[third.options.startIndex].Id, 'three');
-    third.resolve(); await tick(); second.resolve(); await tick();
-    assert.equal(f.currentId, f.core.getSnapshot().queue[2].id);
-    assert.equal(f.effects.filter(effect => effect[0] === 'started' && effect[1] === 'two').length, 0);
-    assert.equal(f.commands.at(-1).type, 'select');
-    void f.manager.previousTrack(); assert.equal(f.prepared.at(-1).values[f.prepared.at(-1).options.startIndex].Id, 'two');
-    f.adapter.dispose(); f.prepared.at(-1).resolve(); await tick();
-});
-
-test('buffering and OS/autoplay pauses do not send party commands; actual native control gestures still do', async () => {
-    const f = await fixture(); await f.start(); const count = f.commands.length;
-    f.events.trigger(f.player, 'waiting'); f.physicalPause(true); f.runInterval();
-    assert.equal(f.commands.length, count);
-    f.events.trigger(f.player, 'playing');
-    f.physicalPause(true);
-    assert.equal(f.commands.length, count, 'an OS pause with no native control gesture stays personal');
-    f.domHandlers.get('pointerdown')({ isTrusted: true, target: { closest: () => ({}) } });
-    f.physicalPause(true);
-    assert.equal(f.commands.length, count + 1);
-    assert.equal(f.commands.at(-1).paused, true);
-    f.adapter.dispose();
-});
-
-test('native queue edits retain playback, empty queue stops, duplicate media entries retain distinct shared ids', async () => {
-    const f = await fixture(); await f.start(['same', 'same', 'other']);
-    const state = f.core.getSnapshot();
-    assert.notEqual(state.queue[0].id, state.queue[1].id);
-    void f.manager.movePlaylistItem(state.queue[2].id, 1);
-    assert.deepEqual(f.manager._playQueueManager.getPlaylist().map(item => item.Id), ['same', 'other', 'same']);
-    assert.equal(f.prepared.length, 1);
-    void f.manager.clearQueue(true);
-    assert.equal(f.commands.at(-1).type, 'stop');
-    assert.equal(f.paused, true);
-    f.adapter.dispose();
-});
-
-test('disposing restores native controls and invalidates pending media preparation without broadcasting Stop', async () => {
-    const f = await fixture(); const pending = f.begin(); const count = f.commands.length;
-    f.adapter.dispose(); pending.resolve(); await tick();
-    assert.equal(f.manager.pause, f.originalPause);
-    assert.equal(f.manager.activityPlayback, undefined);
-    assert.equal(f.intervals.size, 0);
-    assert.equal(f.domHandlers.size, 0);
-    assert.equal(f.commands.length, count);
-    assert.equal(f.effects.some(effect => effect[0] === 'started'), false);
-    assert.deepEqual(f.errors, []);
-});
-
-test('automatic episode-end checks the ended entry before advancing a replaced party and RepeatOne starts a fresh instance', async () => {
-    const f = await fixture(); await f.start();
-    const oldEntry = f.core.getSnapshot().queue[0].id;
-    void f.manager.nextTrack(); const count = f.commands.length;
-    f.manager.activityPlayback.ended({ PlayState: { PlaylistItemId: oldEntry } });
-    assert.equal(f.commands.length, count, 'a delayed ended callback cannot skip the new episode');
-    f.prepared.at(-1).resolve(); await tick();
-    void f.manager.setRepeatMode('RepeatOne');
-    assert.equal(f.manager.getRepeatMode(), 'RepeatOne', 'repeat changes apply locally before acknowledgement');
-    const before = f.core.getSnapshot();
-    const stopped = { PlayState: { PlaylistItemId: before.queue[before.index].id } };
-    const ended = f.manager.activityPlayback.captureEnded(stopped);
-    void f.manager.activityPlayback.ended(stopped, ended);
-    assert.equal(f.commands.at(-1).queueItemId, before.queue[before.index].id);
-    assert.equal(f.core.getSnapshot().queueRevision, before.queueRevision + 1, 'a repeated episode owns a fresh queue revision');
-    assert.equal(f.prepared.length, 3, 'ended clears the native source, so RepeatOne prepares the same item again');
-    const countAfterRepeat = f.commands.length;
-    f.manager.activityPlayback.ended(stopped, ended);
-    assert.equal(f.commands.length, countAfterRepeat, 'a delayed end belongs to its captured playback revision');
-    f.prepared.at(-1).resolve(); await tick();
-    assert.equal(f.manager.getRepeatMode(), 'RepeatOne', 'native setPlaylist must not reset the shared repeat choice');
-    f.adapter.dispose();
-});
-
-test('Back invalidates unfinished item expansion without stopping an already ready player', async () => {
-    for (const playing of [false, true]) {
-        const f = await fixture();
-        if (playing) await f.start();
-        const hook = f.manager.activityPlayback;
-        const preparation = hook.beginPreparation();
-        const commandCount = f.commands.length;
-        hook.cancelPendingPreparation();
-        assert.equal(hook.isPreparationCurrent(preparation), false);
-        assert.equal(f.commands.length, commandCount);
-        if (playing) assert.equal(f.paused, false);
-        f.adapter.dispose();
-    }
-});
-
-test('Back cancels a stream preparation so its late response cannot reopen playback', async () => {
-    const f = await fixture();
-    const old = f.begin();
-    void f.manager.activityPlayback.cancelPendingPreparation();
-    assert.equal(old.options.activityIsCurrent(), false);
-    assert.equal(f.commands.at(-1).type, 'stop');
-    assert.equal(f.core.getSnapshot().queue.length, 0);
-    old.resolve(); await tick();
-    assert.equal(f.effects.some(effect => effect[0] === 'started'), false);
-    assert.deepEqual(f.errors, []);
-    await f.start(['new']);
-    assert.deepEqual(f.effects.filter(effect => effect[0] === 'started'), [['started', 'new']]);
-    f.adapter.dispose();
-});
-
-test('Back cancels failed preparation retries before they can reopen the player', async () => {
-    const f = await fixture(); let calls = 0;
-    f.manager.getItemsForPlayback = async () => { calls++; throw new Error('Temporary failure'); };
-    f.remote({ queue: [{ id: 'entry', itemId: 'episode' }], index: 0, paused: false, queueRevision: 1 });
-    await tick();
-    void f.manager.activityPlayback.cancelPendingPreparation();
-    f.advance(30_000); f.runInterval(); await tick();
-    assert.equal(calls, 1);
-    assert.equal(f.commands.at(-1).type, 'stop');
-    assert.equal(f.core.getSnapshot().queue.length, 0);
-    f.adapter.dispose();
-});
-
-test('Stop and a remote title replacement invalidate native item translation still in flight', async () => {
-    for (const action of ['stop', 'replace']) {
-        const f = await fixture(); const hook = f.manager.activityPlayback;
-        const preparation = hook.beginPreparation();
-        assert.equal(hook.isPreparationCurrent(preparation), true);
-        if (action === 'stop') void f.manager.stop();
-        else f.remote({ queue: [{ id: 'remote-entry', itemId: 'remote-title' }], index: 0, positionTicks: 0, paused: false, queueRevision: 1 });
-        assert.equal(hook.isPreparationCurrent(preparation), false, action);
-        f.adapter.dispose(); await tick();
-    }
-});
-
-
-test('remote queue entry id reuse with a different media id hydrates and plays the authorized replacement', async () => {
-    const f = await fixture(); await f.start(['old']); f.ack(); await tick();
-    const before = f.core.getSnapshot();
-    f.remote({ queue: [{ id: before.queue[0].id, itemId: 'replacement' }], queueRevision: before.queueRevision + 1 });
-    await tick();
-    assert.equal(f.prepared.at(-1).values[0].Id, 'replacement');
-    f.prepared.at(-1).resolve(); await tick();
-    assert.equal(f.manager._playQueueManager.getPlaylist()[0].Id, 'replacement');
-    f.adapter.dispose();
-});
-
-test('shared RepeatAll chooses the first entry at the end while RepeatNone stops the queue', async () => {
-    for (const repeatMode of ['RepeatAll', 'RepeatNone']) {
-        const f = await fixture(); await f.start(['only']);
-        void f.manager.setRepeatMode(repeatMode);
-        const state = { PlayState: { PlaylistItemId: f.currentId } };
-        const ended = f.manager.activityPlayback.captureEnded(state);
-        void f.manager.activityPlayback.ended(state, ended);
-        assert.equal(f.commands.at(-1).type, repeatMode === 'RepeatAll' ? 'select' : 'stop');
-        f.adapter.dispose();
-    }
-});
-
-
-test('only natural episode ends mark their selection or Stop as automatic', async () => {
-    for (const ids of [['one', 'two'], ['only']]) {
-        const f = await fixture(); await f.start(ids);
-        void f.manager.pause(); void f.manager.seek(10_000_000); void f.manager.unpause();
-        assert.ok(f.intents.every(intent => intent.options?.automatic !== true));
-        const state = { PlayState: { PlaylistItemId: f.currentId } };
-        const ended = f.manager.activityPlayback.captureEnded(state);
-        void f.manager.activityPlayback.ended(state, ended);
-        assert.equal(f.intents.at(-1).options.automatic, true);
-        assert.equal(f.intents.at(-1).operation.type, ids.length > 1 ? 'select' : 'stop');
-        void f.manager.stop();
-        assert.equal(f.intents.at(-1).operation.type, 'stop');
-        assert.notEqual(f.intents.at(-1).options?.automatic, true, 'manual Stop must retain conflict feedback');
-        f.adapter.dispose();
-    }
-});
-
-test('a queue insertion during remote hydration cannot use the new index against an older prepared array', async () => {
-    const f = await fixture();
-    const delayed = deferred();
-    f.manager.getItemsForPlayback = () => delayed.promise;
-    const oldQueue = [{ id: 'a', itemId: 'one' }, { id: 'b', itemId: 'two' }];
-    f.remote({ queue: oldQueue, index: 0, queueRevision: 1, paused: false });
-    f.remote({ queue: [{ id: 'x', itemId: 'inserted' }, ...oldQueue], index: 1, queueRevision: 2, paused: false });
-    delayed.resolve({ Items: [{ Id: 'one', ServerId: 'server' }, { Id: 'two', ServerId: 'server' }] });
-    await tick();
-    const prepared = f.prepared.at(-1);
-    assert.equal(prepared.values[prepared.options.startIndex].Id, 'one', 'the chosen entry remains one after its queue index changes');
-    f.adapter.dispose();
-});
-
-test('next episode discards version and track ids chosen for the initial episode', async () => {
-    const f = await fixture();
-    void f.manager.activityPlayback.playPrepared([{ Id: 'one' }, { Id: 'two' }], {
-        startIndex: 0, mediaSourceId: 'one-version', audioStreamIndex: 2, subtitleStreamIndex: 4, maxBitrate: 8000000
-    });
-    const first = f.prepared.at(-1);
-    assert.equal(first.options.mediaSourceId, 'one-version');
-    assert.equal(first.options.audioStreamIndex, 2);
-    first.resolve(); await tick(); f.ack();
-    void f.manager.nextTrack();
-    const next = f.prepared.at(-1);
-    assert.equal(next.values[next.options.startIndex].Id, 'two');
-    assert.equal(next.options.mediaSourceId, undefined, 'an earlier version cannot be requested against another episode');
-    assert.equal(next.options.audioStreamIndex, undefined);
-    assert.equal(next.options.subtitleStreamIndex, undefined);
-    assert.equal(next.options.maxBitrate, 8000000);
-    assert.equal(next.options.activityRetainTracks, true, 'native language matching retains track preferences');
-    f.adapter.dispose();
-});
-
-test('native failure consumed as success cannot recursively prepare without a player', async () => {
-    const f = await fixture(); let attempts = 0;
-    f.manager.activityPlayPrepared = async () => { attempts++; };
-    f.begin(); await tick();
-    assert.equal(attempts, 1);
-    for (let i = 0; i < 20; i++) f.reconcile({ origin: 'reconcile', resumed: true });
-    await tick();
-    assert.equal(attempts, 1, 'refresh events cannot bypass backoff');
-    for (const ms of [5000, 10000, 20000, 60000]) {
-        f.advance(ms); f.runInterval(); await tick();
-    }
-    assert.equal(attempts, 4, 'initial attempt plus three automatic retries');
-    f.reconcile({ origin: 'reconcile', resumed: true }); await tick();
-    assert.equal(attempts, 4, 'refresh cannot reset the exhausted retry budget');
-    f.adapter.dispose();
-});
-
-test('pause then play from a stalled or lagging viewer cannot rewind the party', async () => {
-    for (const waiting of [true, false]) {
-        for (const toggle of [true, false]) {
-            const f = await fixture(); await f.start(); f.ack();
-            f.advance(10000); f.setTicks(40000000);
-            if (waiting) f.events.trigger(f.player, 'waiting');
-            void f.manager[toggle ? 'playPause' : 'pause']();
-            assert.equal(f.commands.at(-1).positionTicks, 100000000, 'pause uses the party clock when local playback is behind');
-            assert.equal(f.core.getSnapshot().paused, true);
-            assert.equal(f.core.getSnapshot().positionTicks, 100000000);
-            assert.equal(f.paused, true);
-            // Native seeks complete asynchronously; resuming during catch-up
-            // must not send the stalled frame before the seek has completed.
-            f.setTicks(40000000);
-            void f.manager[toggle ? 'playPause' : 'unpause']();
-            assert.equal(f.commands.at(-1).positionTicks, 100000000);
-            assert.equal(f.core.getSnapshot().paused, false);
-            assert.equal(f.paused, false);
-            f.advance(1000);
-            assert.equal(f.core.getSnapshot().positionTicks, 110000000);
-            f.adapter.dispose();
-        }
-    }
-});
-
-test('normal pause keeps the nearby displayed frame and deliberate seeks still use the requested position', async () => {
-    const f = await fixture(); await f.start(); f.ack();
-    f.advance(10000); f.setTicks(95000000);
-    void f.manager.pause();
-    assert.equal(f.commands.at(-1).positionTicks, 95000000, 'normal playback preserves precise pause behavior');
-    f.events.trigger(f.player, 'waiting');
-    void f.manager.seek(20000000);
-    assert.equal(f.commands.at(-1).type, 'seek');
-    assert.equal(f.core.getSnapshot().positionTicks, 20000000, 'explicit seek remains an intentional timeline change');
-    f.adapter.dispose();
-});
-
-test('trusted native pause controls also preserve the party clock when local playback is behind', async () => {
-    const f = await fixture(); await f.start(); f.ack();
-    f.advance(10000); f.setTicks(40000000);
-    f.domHandlers.get('pointerdown')({ isTrusted: true, target: { closest: () => ({}) } });
-    f.physicalPause(true);
-    assert.equal(f.commands.at(-1).type, 'setPlayback');
-    assert.equal(f.commands.at(-1).paused, true);
-    assert.equal(f.commands.at(-1).positionTicks, 100000000);
-    f.adapter.dispose();
+test('shared pause and seek received during native loading survive until media readiness', async () => {
+    const f = fixture();
+    try {
+        await f.adapter.start(); await f.adapter.playSelection({ libraryItemId: 'book-one' }); await flush();
+        f.handlers.playerState = 'LOADING';
+        await f.adapter.pause(); await f.adapter.seek(70);
+        assert.equal(f.handlers.playWhenReady, false); assert.equal(f.handlers.player.playWhenReady, false); assert.equal(f.handlers.startTimeOverride, 70);
+        f.handlers.playerState = 'LOADED';
+        f.handlers.player.player.dispatchEvent(new f.window.Event('loadedmetadata'));
+        assert.equal(f.handlers.time, 70); assert.equal(f.handlers.playerPlaying, false);
+    } finally { f.close(); }
 });

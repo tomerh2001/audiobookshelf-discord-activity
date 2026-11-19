@@ -5,7 +5,7 @@ export const HLS_BODY_IDLE_TIMEOUT_MS = 15_000;
 
 /** Only finite HLS media/init fragments get a body watchdog, not full movies. */
 export function nativeSegmentIdleTimeout(path: string): number | undefined {
-  return /^\/(?:Videos|Audio)\/[a-zA-Z0-9_-]+\/hls1?\/(?:[a-zA-Z0-9_-]+\/)+[a-zA-Z0-9_-]+\.(?:ts|mp4|m4s|m4a|aac|mp3)$/i.test(path)
+  return /^\/hls\/[a-zA-Z0-9_-]+\/output-[0-9]+\.ts$/.test(path)
     ? HLS_BODY_IDLE_TIMEOUT_MS : undefined;
 }
 

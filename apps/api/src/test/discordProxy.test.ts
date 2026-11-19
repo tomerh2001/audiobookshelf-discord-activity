@@ -83,7 +83,7 @@ describe("Discord-only ingress", () => {
   it("requires proxy proof on UI, assets, APIs, media, unknown routes and every HTTP method", async () => {
     const app = await buildApp(loadEnv(envInput));
     try {
-      for (const url of ["/", "/assets/app.js", "/api/config", "/api/health", "/jf/stolen/Videos/0123456789abcdef0123456789abcdef/stream", "/unknown", "/jf/stolen/socket"]) {
+      for (const url of ["/", "/assets/app.js", "/api/config", "/api/health", "/abs/stolen/Videos/0123456789abcdef0123456789abcdef/stream", "/unknown", "/abs/stolen/socket"]) {
         const response = await app.inject({ url, remoteAddress: "198.51.100.4" });
         expect(response.statusCode, url).toBe(401);
         expect(response.headers["cache-control"]).toBe("private, no-store");
@@ -161,7 +161,7 @@ describe("Discord-only ingress", () => {
     const app = await buildApp(env);
     try {
       const base = await app.listen({ host: "127.0.0.1", port: 0 });
-      const url = `${base}/jf/stolen/socket`;
+      const url = `${base}/abs/stolen/socket`;
       expect(await upgradeStatus(url, {})).toBe(401);
       expect(await upgradeStatus(url, signed())).toBe(401);
     } finally { await app.close(); }

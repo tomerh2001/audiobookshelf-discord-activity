@@ -23,7 +23,7 @@ export class ActivityPlaybackCoordinator {
     let state = this.states.get(party.id);
     if (!state) {
       state = { snapshot: { epoch: party.groupId, revision: 0, queueRevision: 0, queue: [], index: -1,
-        positionTicks: 0, paused: true, repeatMode: "RepeatNone", serverTimeMs: this.now() }, anchor: this.now(), actors: new Map(), listeners: new Map() };
+        positionTicks: 0, paused: true, playbackRate: 1, repeatMode: "RepeatNone", serverTimeMs: this.now() }, anchor: this.now(), actors: new Map(), listeners: new Map() };
       this.states.set(party.id, state);
     }
     return state;
@@ -32,8 +32,8 @@ export class ActivityPlaybackCoordinator {
   private project(state: State): ActivityPlaybackSnapshot {
     const now = this.now();
     return { ...state.snapshot, queue: state.snapshot.queue.map((entry) => ({ ...entry })), serverTimeMs: now,
-      positionTicks: Math.min(7 * 86400 * 10_000_000, Math.round(state.snapshot.positionTicks
-        + (state.snapshot.paused ? 0 : Math.max(0, now - state.anchor) * 10_000))) };
+      positionTicks: Math.min(365 * 86400 * 10_000_000, Math.round(state.snapshot.positionTicks
+        + (state.snapshot.paused ? 0 : Math.max(0, now - state.anchor) * 10_000 * state.snapshot.playbackRate))) };
   }
 
   private response(state: State, viewer: NativeViewer, snapshot = this.project(state)): ActivityPlaybackState {
@@ -43,8 +43,8 @@ export class ActivityPlaybackCoordinator {
   private async allowed(viewer: NativeViewer): Promise<void> {
     await this.service.authorize(viewer.capability);
     if ((this.mediaPermission.get(viewer) ?? 0) > this.now()) return;
-    const user = await this.service.json(viewer, "GET", "/Users/Me") as { Policy?: { EnableMediaPlayback?: boolean } };
-    if (user?.Policy?.EnableMediaPlayback === false) throw new NativeError("native_playback_denied");
+    const user = await this.service.json(viewer, "GET", "/api/me") as { isActive?: boolean };
+    if (user?.isActive === false) throw new NativeError("native_playback_denied");
     this.mediaPermission.set(viewer, this.now() + 30_000);
   }
 
@@ -135,6 +135,9 @@ export class ActivityPlaybackCoordinator {
       } else if (command.type === "setRepeatMode") {
         queueChanged = next.repeatMode !== command.repeatMode;
         next.repeatMode = command.repeatMode;
+      } else if (command.type === "setPlaybackRate") {
+        next.playbackRate = command.playbackRate;
+        anchor = this.now();
       } else {
         if (!next.queue[next.index]) throw new NativeError("no_playing_item", 409);
         if (command.type === "select") {

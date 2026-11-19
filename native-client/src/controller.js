@@ -105,7 +105,7 @@ export function createActivityController(broker, installLaunch, deviceId) {
                 let current = await call('getParty');
                 if (!currentSelection()) return;
                 if (current && !replaceParty && !broker.matchesPartyServer(connection, current)) {
-                    throw new Error('This party is using another Jellyfin server. Connect an account on that server to join.');
+                    throw new Error('This party is using another Audiobookshelf server. Connect an account on that server to join.');
                 }
                 if (!current || replaceParty) current = await call('joinParty', connection.id);
                 if (!currentSelection()) return;

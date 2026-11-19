@@ -14,22 +14,11 @@ function body() {
 }
 
 describe("native HLS body recovery", () => {
-  it.each([
-    "/Videos/item/hls1/main/0.mp4",
-    "/videos/item/hls1/main/-1.mp4",
-    "/Videos/item/hls/main/0.ts",
-    "/Audio/item/hls1/main/0.aac"
-  ])("bounds only media/init segment bodies: %s", path => {
+  it.each(["/hls/session-id/output-0.ts", "/hls/session-id/output-999.ts"])("bounds finite HLS segment bodies: %s", path => {
     expect(nativeSegmentIdleTimeout(path)).toBe(HLS_BODY_IDLE_TIMEOUT_MS);
   });
 
-  it.each([
-    "/Videos/item/stream.mp4",
-    "/Audio/item/stream.mp3",
-    "/Videos/item/main.m3u8",
-    "/Videos/item/hls1/main/key.bin",
-    "/Videos/item/hls1/main/0.vtt"
-  ])("leaves progressive streams and non-media responses unchanged: %s", path => {
+  it.each(["/public/session/session-id/track/1", "/api/items/item-id/file/track-ino", "/hls/session-id/output.m3u8", "/hls/session-id/key.bin"])("leaves progressive streams and non-media responses unchanged: %s", path => {
     expect(nativeSegmentIdleTimeout(path)).toBeUndefined();
   });
 
@@ -108,14 +97,14 @@ describe("native stream cleanup", () => {
     expect(cancel).toHaveBeenCalledTimes(1);
   });
 
-  it("does not apply a movie lifetime or body timeout to a progressive stream", async () => {
+  it("does not apply a fixed lifetime to an audiobook stream", async () => {
     const source = body();
-    const chunks = nativeMediaChunks(source, nativeSegmentIdleTimeout("/Videos/item/stream.mkv"));
+    const chunks = nativeMediaChunks(source, nativeSegmentIdleTimeout("/public/session/session-id/track/1"));
     const reading = chunks.next();
     await vi.advanceTimersByTimeAsync(120_000);
     expect(source.destroyed).toBe(false);
-    source.push(Buffer.from("late movie bytes"));
-    expect((await reading).value?.toString()).toBe("late movie bytes");
+    source.push(Buffer.from("late audiobook bytes"));
+    expect((await reading).value?.toString()).toBe("late audiobook bytes");
     await chunks.return(undefined);
   });
 

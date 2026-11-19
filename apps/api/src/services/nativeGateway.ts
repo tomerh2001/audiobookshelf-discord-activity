@@ -1,417 +1,348 @@
 import { Readable } from "node:stream";
+import { Agent as HttpAgent } from "node:http";
+import { Agent as HttpsAgent } from "node:https";
+import { createHash } from "node:crypto";
 import type { ReadableStream as NodeReadableStream } from "node:stream/web";
 import type { FastifyReply, FastifyRequest } from "fastify";
 import WebSocket, { type RawData } from "ws";
-import { upstreamWebSocketOptions } from "./upstreamPolicy.js";
-import { NativeError, nativeAuthorization, nativeSessionId, type NativePartyService, type NativeViewer } from "./nativeParty.js";
-import { isNativeQueuePath, nativeQueueShape } from "./nativeQueueDiagnostics.js";
-import { sendNativeText } from "./nativeResponse.js";
+import { io, type Socket } from "socket.io-client";
+import { NativeError, nativeAuthorization, type NativePartyService, type NativeViewer } from "./nativeParty.js";
+import { readUpstreamJson, upstreamUrl, upstreamWebSocketOptions } from "./upstreamPolicy.js";
 import { nativeMediaChunks, nativeSegmentIdleTimeout } from "./nativeMediaStream.js";
+import { sendNativeText } from "./nativeResponse.js";
 
-const ID = "[a-zA-Z0-9_-]{1,128}";
-const SECRET_KEYS = new Set(["apikey", "api_key", "access_token", "accesstoken", "token", "password", "pw", "authorization", "x-emby-token", "x-mediabrowser-token"]);
+const ID = "[a-zA-Z0-9_-]{1,64}";
 const MAX_JSON = 16 * 1024 * 1024;
-// Native VOD playlists repeat the complete transcode query for every segment.
-// Feature films can exceed 2MiB; retain a bounded 32MiB allowance.
-const MAX_PLAYLIST = 32 * 1024 * 1024;
 const MAX_SOCKET_BUFFER = 1024 * 1024;
-const readRules = [
-  /^\/System\/Info(?:\/Public)?$/i,
-  /^\/System\/Endpoint$/i,
-  /^\/Playback\/BitrateTest$/i,
-  new RegExp(`^/Videos/${ID}/Trickplay/[0-9]+/(?:tiles\\.m3u8|[0-9]+\\.jpg)$`, "i"),
-  /^\/(?:UserViews|GetUTCTime)$/i,
-  /^\/Branding\/Configuration$/i,
-  /^\/Localization\/(?:Cultures|Countries|ParentalRatings|Options)$/i,
-  /^\/Items(?:\/(?:Filters|Filters2|Counts|Root|Latest))?$/i,
-  /^\/UserItems\/Resume$/i,
-  new RegExp(`^/Items/${ID}(?:/(?:Ancestors|Similar|Collections|ThemeMedia|ThemeSongs|ThemeVideos|PlaybackInfo|Chapters))?$`, "i"),
-  new RegExp(`^/(?:Items|Persons|Artists|Studios|Genres|MusicGenres|Users)/${ID}/Images/[a-z]+(?:/\\d+)?$`, "i"),
-  /^\/(?:Genres|MusicGenres|Artists|Artists\/AlbumArtists|Persons|Studios|Years)$/i,
-  /^\/Search\/Hints$/i,
-  /^\/Shows\/(?:NextUp|Upcoming)$/i,
-  /^\/Movies\/Recommendations$/i,
-  new RegExp(`^/Shows/${ID}/(?:Episodes|Seasons)$`, "i"),
-  new RegExp(`^/Videos/${ID}/(?:AdditionalParts|AlternateSources|Subtitles|Attachments)(?:/${ID})*$`, "i"),
-  new RegExp(`^/Videos/${ID}/(?:stream(?:\\.[a-z0-9]+)?|master\\.m3u8|main\\.m3u8|hls(?:1)?/${ID}(?:/${ID})*/${ID}\\.[a-z0-9]+|${ID}/Subtitles/\\d+/(?:Stream\\.[a-z0-9]+|\\d+/Stream\\.[a-z0-9]+)|${ID}/Attachments/\\d+)$`, "i"),
-  new RegExp(`^/Audio/${ID}/(?:stream(?:\\.[a-z0-9]+)?|universal|master\\.m3u8|main\\.m3u8|hls(?:1)?/${ID}(?:/${ID})*/${ID}\\.[a-z0-9]+)$`, "i"),
-  new RegExp(`^/MediaSegments/${ID}$`, "i"),
-  new RegExp(`^/DisplayPreferences/${ID}$`, "i"),
-  /^\/Sessions$/i
-];
+const startingSessions = new WeakMap<NativeViewer, Promise<unknown>>();
+const record = (value: unknown): Record<string, unknown> => value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+const matches = (path: string, pattern: string) => new RegExp(`^${pattern}$`).test(path);
 
-
-function record(value: unknown): Record<string, unknown> {
-  return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+export function publicSessionId(viewer: NativeViewer, id: string): string {
+  return createHash("sha256").update(`${viewer.capability}\0${id}`).digest("hex");
+}
+function privateSessionId(viewer: NativeViewer, alias: string): string | undefined {
+  return [...viewer.playbackSessions.keys()].find(id => publicSessionId(viewer, id) === alias);
+}
+function publicSessionPath(viewer: NativeViewer, path: string): string {
+  return path.replace(/^\/(api\/session|public\/session|hls)\/([^/]+)/, (_all, prefix: string, id: string) => {
+    if (!viewer.playbackSessions.has(id)) throw new NativeError("native_media_url_denied", 502);
+    return `/${prefix}/${publicSessionId(viewer, id)}`;
+  });
+}
+function privateSessionPath(viewer: NativeViewer, path: string): string {
+  return path.replace(/^\/(api\/session|public\/session|hls)\/([^/]+)/, (_all, prefix: string, alias: string) => {
+    const id = privateSessionId(viewer, alias);
+    if (!id) throw new NativeError("native_path_denied");
+    return `/${prefix}/${id}`;
+  });
 }
 
-/** Reject ambiguous paths before URL normalization can erase traversal evidence. */
-export function canonicalNativePath(path: string): string {
-  if (!path.startsWith("/") || path.startsWith("//") || /[\\\0#?]/.test(path) || /%(?:2f|5c|2e|00|25)/i.test(path)) throw new NativeError("native_path_denied");
-  let decoded: string;
-  try { decoded = decodeURIComponent(path); } catch { throw new NativeError("native_path_denied"); }
-  if (decoded.split("/").some((part) => part === "." || part === "..") || /[\\\0?#]/.test(decoded)) throw new NativeError("native_path_denied");
-  return decoded;
-}
-
-export function allowNativeRequest(viewer: NativeViewer, method: string, inputPath: string): string {
-  const path = canonicalNativePath(inputPath);
-  const own = viewer.connection.jellyfinUserId.replaceAll("-", "").toLowerCase();
-  const userMatch = /^\/Users\/([^/]+)(?:\/|$)/i.exec(path);
-  if (userMatch && userMatch[1]?.toLowerCase() !== "me" && userMatch[1]?.replaceAll("-", "").toLowerCase() !== own) throw new NativeError("native_user_denied");
-  if (method === "GET" || method === "HEAD") {
-    if (new RegExp(`^/Users/(?:Me|${ID})(?:/(?:Views|Items(?:/(?:Latest|Resume|${ID}|${ID}/Intros|${ID}/LocalTrailers|${ID}/SpecialFeatures))?|GroupingOptions))?$`, "i").test(path)) return path;
-    if (readRules.some((rule) => rule.test(path))) return path;
+/** Explicit native browsing/player surface. No administrative or arbitrary file routes. */
+export function allowNativeRequest(viewer: NativeViewer, method: string, path: string, query = new URLSearchParams()): boolean {
+  if (!path.startsWith("/") || /[%\\]/.test(path) || [...path].some(character => character.charCodeAt(0) <= 32) || path.split("/").some(part => part === "." || part === "..")) return false;
+  if ([...query].some(([key, value]) => /token|secret|password|cookie|authorization|redirect|url/i.test(key) || value.length > 4096)) return false;
+  if ([...query.keys()].length > 40) return false;
+  const read = method === "GET" || method === "HEAD";
+  if (read) {
+    // Express also routes HEAD to GET handlers. These native GET endpoints
+    // change progress, so never treat them as harmless HEAD probes.
+    if (matches(path, `/api/me/progress/${ID}/remove-from-continue-listening`)
+      || matches(path, `/api/me/series/${ID}/(?:remove-from|readd-to)-continue-listening`)) return method === "GET";
+    if (matches(path, `/api/libraries(?:/${ID}(?:/(?:items|series|collections|playlists|personalized|filterdata|search|stats|authors|narrators|recent-episodes|podcast-titles)(?:/${ID})?)?)?`)) return true;
+    if (matches(path, `/api/items/${ID}(?:/cover)?`)) return true;
+    if (matches(path, `/api/(?:authors|series|collections|playlists)(?:/${ID}(?:/(?:image|books))?)?`)) return true;
+    if (matches(path, `/api/me(?:/(?:progress|bookmarks|items-in-progress|listening-sessions|listening-stats)(?:/${ID})?)?`)) return true;
+    if (matches(path, `/api/me/progress/${ID}/${ID}`)) return true;
+    if (matches(path, `/api/me/item/listening-sessions/${ID}(?:/${ID})?`)) return true;
+    if (matches(path, `/api/me/stats/year/[0-9]{4}`)) return true;
+    if (matches(path, `/api/items/${ID}/file/${ID}`)) return true;
+    const session = new RegExp(`^/(?:api/session/(${ID})|public/session/(${ID})/track/[0-9]{1,6}|hls/(${ID})/(?:output(?:-[0-9]+)?\\.(?:m3u8|ts)))$`).exec(path);
+    if (session) return !!privateSessionId(viewer, session[1] ?? session[2] ?? session[3]!);
   }
-  if (method === "POST") {
-    if (new RegExp(`^/Items/${ID}/PlaybackInfo$`, "i").test(path)) return path;
-    if (/^\/Sessions\/(?:Capabilities(?:\/Full)?|Playing(?:\/(?:Progress|Stopped))?)$/i.test(path)) return path;
-    if (new RegExp(`^/DisplayPreferences/${ID}$`, "i").test(path)) return path;
-    if (new RegExp(`^/Users/${ID}/(?:Configuration|PlayedItems/${ID}|FavoriteItems/${ID})$`, "i").test(path)) return path;
-  }
-  if ((method === "POST" || method === "DELETE") && /^\/User(?:Favorite|Played)Items\/[a-f0-9-]{32,36}$/i.test(path)) return path;
-  if (method === "DELETE" && (new RegExp(`^/Users/${ID}/(?:PlayedItems|FavoriteItems)/${ID}$`, "i").test(path) || /^\/Videos\/ActiveEncodings$/i.test(path))) return path;
-  throw new NativeError("native_route_denied");
+  if (method === "POST" && path === "/api/authorize") return true;
+  if (method === "POST" && path === "/api/items/batch/get") return true;
+  if (method === "POST" && matches(path, `/api/items/${ID}/play(?:/${ID})?`)) return true;
+  const sessionWrite = new RegExp(`^/api/session/(${ID})/(sync|close)$`).exec(path);
+  if (method === "POST" && sessionWrite) return !!privateSessionId(viewer, sessionWrite[1]!);
+  if (["POST", "PATCH", "DELETE"].includes(method) && matches(path, `/api/me/item/${ID}/bookmark(?:/[0-9.]+)?`)) return true;
+  if (["PATCH", "DELETE"].includes(method) && matches(path, `/api/me/progress/${ID}(?:/${ID})?`)) return true;
+  // User settings use the current account only; never forward a user-selected ID.
+  if (method === "PATCH" && path === `/api/users/${viewer.connection.audiobookshelfUserId}/settings`) return true;
+  if (method === "POST" && matches(path, `/api/playlists/collection/${ID}`)) return true;
+  if (["POST", "PATCH", "DELETE"].includes(method) && matches(path, `/api/playlists(?:/${ID}(?:/(?:item|batch/add|batch/remove)(?:/${ID}(?:/${ID})?)?)?)?`)) return true;
+  return false;
 }
 
-export function nativeRequestTarget(viewer: NativeViewer, path: string, query: URLSearchParams): string {
-  const params = new URLSearchParams();
-  for (const [key, value] of query) {
-    const lower = key.toLowerCase();
-    if (SECRET_KEYS.has(lower) || ["userid", "userids", "deviceid", "sessionid", "controllinguserid", "groupid"].includes(lower)) continue;
-    if (["url", "path", "redirect", "redirecturl"].includes(lower)) throw new NativeError("native_parameter_denied");
-    params.append(key, value);
-  }
-  params.set("UserId", viewer.connection.jellyfinUserId);
-  params.set("DeviceId", viewer.deviceId);
-  // Native web playback reports use their server-created PlaySessionId unchanged.
-  if (/^\/Sessions(?:\/Capabilities(?:\/Full)?)?$/i.test(path)) params.set("Id", nativeSessionId(viewer));
-  return `${path}?${params}`;
+function mediaUrl(viewer: NativeViewer, value: string): string {
+  const url = upstreamUrl(viewer.connection.target, value);
+  const basePath = new URL(viewer.connection.serverUrl).pathname.replace(/\/$/, "");
+  const path = publicSessionPath(viewer, url.pathname.slice(basePath.length));
+  for (const key of [...url.searchParams.keys()]) if (/token|secret|api.?key/i.test(key)) url.searchParams.delete(key);
+  if (!allowNativeRequest(viewer, "GET", path, url.searchParams)) throw new NativeError("native_media_url_denied", 502);
+  return `/abs/${viewer.capability}${path}${url.search}`;
 }
 
-function scopedBody(viewer: NativeViewer, value: unknown): unknown {
-  if (Array.isArray(value)) return value.map((part) => scopedBody(viewer, part));
-  if (!value || typeof value !== "object") return value;
-  const result: Record<string, unknown> = {};
-  for (const [key, part] of Object.entries(record(value))) {
-    const lower = key.toLowerCase();
-    if (SECRET_KEYS.has(lower)) continue;
-    if (lower === "userid" || lower === "controllinguserid") result[key] = viewer.connection.jellyfinUserId;
-    else if (lower === "userids") result[key] = [viewer.connection.jellyfinUserId];
-    else if (lower === "deviceid") result[key] = viewer.deviceId;
-    else if (lower === "sessionid") result[key] = nativeSessionId(viewer);
-    else result[key] = scopedBody(viewer, part);
-  }
-  return result;
+/** Sanitize all upstream objects, including admin users and embedded library items. */
+export function sanitizeNativeJson(viewer: NativeViewer, value: unknown): unknown {
+  const clean = (input: unknown, sessionRecord = false): unknown => {
+    if (typeof input === "string") return input.replaceAll(viewer.connection.accessToken, "[redacted]");
+    if (Array.isArray(input)) return input.map((entry) => clean(entry, sessionRecord));
+    if (input === null || typeof input !== "object") return input;
+    const result: Record<string, unknown> = {};
+    for (const [key, entry] of Object.entries(input)) {
+      // History contains live native session UUIDs, including other viewers of a
+      // shared account. Those UUIDs can unlock ABS public stream routes directly.
+      // Keep library/item IDs intact; only these contextual records lose IDs.
+      if (sessionRecord && ["id", "sessionId", "streamId"].includes(key)) continue;
+      if (["sessions", "recentSessions"].includes(key) && Array.isArray(entry)) { result[key] = clean(entry, true); continue; }
+      if (["sessionId", "streamId"].includes(key) && typeof entry === "string" && !viewer.playbackSessions.has(entry)) continue;
+      // Native cover components test presence, then construct their own scoped
+      // /cover or /image URL. Preserve that signal without server filesystem paths.
+      if (["coverPath", "imagePath"].includes(key)) { result[key] = entry ? "available" : null; continue; }
+      if (/token|secret|password|authorization|cookie|openid|apikey/i.test(key)
+        || ["path", "fullPath", "relPath", "folders", "usersOnline", "deviceInfo", "ipAddress", "userAgent"].includes(key)) continue;
+      if (["id", "sessionId", "streamId", "stream"].includes(key) && typeof entry === "string" && viewer.playbackSessions.has(entry)) result[key] = publicSessionId(viewer, entry);
+      else if (key === "contentUrl" && typeof entry === "string") result[key] = mediaUrl(viewer, entry);
+      else if (key === "permissions") result[key] = { ...record(clean(entry)), update: false, delete: false, upload: false, download: false };
+      else if (key === "type" && ["root", "admin"].includes(String(entry))) result[key] = "user";
+      else result[key] = clean(entry);
+    }
+    return result;
+  };
+  return clean(value);
 }
 
-export function nativeRequestBody(service: NativePartyService, viewer: NativeViewer, path: string, input: unknown): unknown {
-  const body = scopedBody(viewer, input);
-  if (/^\/Sessions\/Capabilities(?:\/Full)?$/i.test(path)) {
-    return { ...record(body), SupportsMediaControl: false, SupportsRemoteControl: false, SupportsSync: false };
-  }
-  return body;
-}
-
-/** Every upstream URI stays below the server's configured base path. */
-export function rewriteNativeUrl(viewer: NativeViewer, reference: string, relativeTo?: string): string {
-  const base = new URL(viewer.connection.serverUrl.replace(/\/$/, "") + "/");
-  const resolved = new URL(reference, relativeTo ?? base);
-  if (resolved.origin !== base.origin || resolved.username || resolved.password || !resolved.pathname.startsWith(base.pathname)) throw new NativeError("native_media_target_denied", 502);
-  const path = canonicalNativePath(`/${resolved.pathname.slice(base.pathname.length)}`);
-  allowNativeRequest(viewer, "GET", path);
-  const query = new URLSearchParams(resolved.search);
-  for (const key of [...query.keys()]) if (SECRET_KEYS.has(key.toLowerCase())) query.delete(key);
-  const search = query.toString();
-  return `/jf/${viewer.capability}${path}${search ? `?${search}` : ""}`;
-}
-
-export function rewriteNativePlaylist(viewer: NativeViewer, playlist: string, upstreamUrl: string): string {
-  if (!playlist.trimStart().startsWith("#EXTM3U")) throw new NativeError("native_invalid_playlist", 502);
-  return playlist.split(/\r?\n/).map((line) => {
+export function rewriteNativePlaylist(viewer: NativeViewer, text: string, sourceUrl: string): string {
+  if (text.length > 2 * 1024 * 1024) throw new NativeError("native_playlist_too_large", 502);
+  const rewrite = (value: string) => mediaUrl(viewer, new URL(value, sourceUrl).href);
+  return text.split("\n").map(line => {
     if (!line.trim()) return line;
-    if (line.startsWith("#")) return line.replaceAll(/URI=(?:"([^"]+)"|([^,\s]+))/g, (_match, quoted: string | undefined, unquoted: string | undefined) => `URI="${rewriteNativeUrl(viewer, quoted ?? unquoted ?? "", upstreamUrl)}"`);
-    return rewriteNativeUrl(viewer, line.trim(), upstreamUrl);
+    if (line.startsWith("#")) return line.replace(/URI="([^"]+)"/g, (_match, value: string) => `URI="${rewrite(value)}"`);
+    return rewrite(line.trim());
   }).join("\n");
 }
 
-function rewriteApiReference(viewer: NativeViewer, reference: string): string {
-  const base = viewer.connection.serverUrl.replace(/\/$/, "") + "/";
-  // Jellyfin's API client concatenates its base with DTO URLs. A leading slash
-  // in a native DTO is API-relative, whereas an HLS URI follows URL resolution.
-  const resolved = /^[a-z][a-z0-9+.-]*:/i.test(reference) || reference.startsWith("//")
-    ? reference : new URL(reference.replace(/^\//, ""), base).href;
-  return rewriteNativeUrl(viewer, resolved);
+function ownsCommunityProgress(service: NativePartyService, viewer: NativeViewer): boolean {
+  if (viewer.connection.kind !== "community") return true;
+  // One active writer for this shared account across the Activity process. Followers retain their own stream sessions.
+  const owners = [...service.viewers.values()].filter(candidate => candidate.connection.serverUrl === viewer.connection.serverUrl && service.active(candidate)
+    && candidate.sockets > 0 && candidate.connection.audiobookshelfUserId === viewer.connection.audiobookshelfUserId)
+    .sort((left, right) => left.deviceId.localeCompare(right.deviceId));
+  return !owners.length || owners[0] === viewer;
 }
 
-export function sanitizeNativeJson(viewer: NativeViewer, value: unknown, key = ""): unknown {
-  if (Array.isArray(value)) return value.map((part) => sanitizeNativeJson(viewer, part));
-  if (value && typeof value === "object") {
-    const result: Record<string, unknown> = {};
-    for (const [name, part] of Object.entries(record(value))) {
-      if (SECRET_KEYS.has(name.toLowerCase())) continue;
-      if (name === "CustomCss") { result[name] = ""; continue; }
-      if (["InternalMetadataPath", "CachePath", "LogPath", "ProgramDataPath", "WebPath", "TranscodingTempPath", "PasswordResetProviderId", "AuthenticationProviderId"].includes(name)) continue;
-      result[name] = sanitizeNativeJson(viewer, part, name);
+export async function proxyNativeRequest(service: NativePartyService, viewer: NativeViewer, request: FastifyRequest,
+  reply: FastifyReply, path: string, query: URLSearchParams): Promise<unknown> {
+  if (request.method !== "POST" || !matches(path, `/api/items/${ID}/play(?:/${ID})?`)) {
+    return proxyRequest(service, viewer, request, reply, path, query);
+  }
+  // ABS replaces the previous session for a device. Serialize starts so a slower
+  // response cannot publish a capability for a session already closed upstream.
+  const task = (startingSessions.get(viewer)?.catch(() => undefined) ?? Promise.resolve())
+    .then(() => proxyRequest(service, viewer, request, reply, path, query));
+  startingSessions.set(viewer, task);
+  try { return await task; }
+  finally { if (startingSessions.get(viewer) === task) startingSessions.delete(viewer); }
+}
+
+async function proxyRequest(service: NativePartyService, viewer: NativeViewer, request: FastifyRequest,
+  reply: FastifyReply, path: string, query: URLSearchParams): Promise<unknown> {
+  if (!service.active(viewer)) throw new NativeError("native_session_expired", 401);
+  if (!allowNativeRequest(viewer, request.method, path, query)) throw new NativeError("native_path_denied");
+  const itemMatch = new RegExp(`^/api/items/(${ID})(?:/|$)`).exec(path);
+  if (itemMatch && path !== "/api/items/batch/get") await service.requireItem(viewer, itemMatch[1]!);
+  const play = new RegExp(`^/api/items/(${ID})/play(?:/(${ID}))?$`).exec(path);
+  const session = new RegExp(`^/api/session/(${ID})/(sync|close)$`).exec(path);
+  const directProgressWrite = ["PATCH", "DELETE"].includes(request.method) && matches(path, `/api/me/progress/${ID}(?:/${ID})?`);
+  const continueListeningWrite = request.method === "GET" && (matches(path, `/api/me/progress/${ID}/remove-from-continue-listening`)
+    || matches(path, `/api/me/series/${ID}/(?:remove-from|readd-to)-continue-listening`));
+  if ((directProgressWrite || continueListeningWrite)
+    && !ownsCommunityProgress(service, viewer)) throw new NativeError("native_shared_progress_read_only");
+  let body = request.body;
+  if (request.method === "POST" && path === "/api/items/batch/get") {
+    const ids = record(body).libraryItemIds;
+    if (!Array.isArray(ids) || !ids.length || ids.length > 500 || !ids.every(id => typeof id === "string" && matches(id, ID))) {
+      throw new NativeError("native_invalid_items", 400);
     }
-    if ("IsAdministrator" in result) result.IsAdministrator = false;
-    if ("EnableRemoteAccess" in result) result.EnableRemoteAccess = false;
-    if ("EnableContentDeletion" in result) result.EnableContentDeletion = false;
-    // Hide native file-download controls: this gateway exposes streaming
-    // playback, not Jellyfin's file-download routes.
-    if ("EnableContentDownloading" in result) result.EnableContentDownloading = false;
-    // This gateway supports library playback, not Live TV. Advertising Live TV
-    // makes native Home await a denied optional request before loading any rows.
-    if ("EnableLiveTvAccess" in result) result.EnableLiveTvAccess = false;
-    if ("EnableLiveTvManagement" in result) result.EnableLiveTvManagement = false;
-    return result;
+    body = { libraryItemIds: [...new Set(ids)] };
   }
-  if (typeof value !== "string") return value;
-  const text = value.replaceAll(viewer.connection.accessToken, viewer.capability);
-  if (["TranscodingUrl", "DirectStreamUrl", "DeliveryUrl"].includes(key) && text) return rewriteApiReference(viewer, text).slice(`/jf/${viewer.capability}/`.length);
-  if (key === "StreamUrl" && text) return rewriteApiReference(viewer, text);
-  if (["ServerAddress", "LocalAddress", "WanAddress"].includes(key)) return `/jf/${viewer.capability}`;
-  if (key === "Path") return ""; // Physical media paths are not browser credentials or useful UI data.
-  if (text.startsWith(viewer.connection.serverUrl)) {
-    try { return rewriteNativeUrl(viewer, text); } catch { return ""; }
+  if (play) {
+    const input = record(body);
+    // A client cannot close another community viewer's session by borrowing their device ID.
+    body = { deviceInfo: { deviceId: viewer.deviceId, clientName: "Audiobookshelf Discord Activity", clientVersion: "0.1.0" },
+      supportedMimeTypes: Array.isArray(input.supportedMimeTypes) ? input.supportedMimeTypes.filter(value => typeof value === "string" && /^audio\/[\w.+-]{1,80}$/.test(value)).slice(0, 30) : [],
+      mediaPlayer: "html5", forceTranscode: input.forceTranscode === true, forceDirectPlay: input.forceDirectPlay === true };
   }
-  return text;
-}
-
-async function readBounded(response: Response, limit: number, signal: AbortSignal): Promise<string> {
-  if (!response.body) return "";
-  const stream = Readable.fromWeb(response.body as unknown as NodeReadableStream, { signal });
-  const chunks: Buffer[] = [];
-  let bytes = 0;
-  try {
-    for await (const part of stream) {
-      const buffer = Buffer.from(part as Uint8Array);
-      bytes += buffer.length;
-      if (bytes > limit) throw new NativeError("native_response_too_large", 502);
-      chunks.push(buffer);
-    }
-    return Buffer.concat(chunks).toString("utf8");
-  } finally { stream.destroy(); }
-}
-
-export async function proxyNativeRequest(service: NativePartyService, viewer: NativeViewer, request: FastifyRequest, reply: FastifyReply, path: string, query: URLSearchParams): Promise<FastifyReply> {
-  allowNativeRequest(viewer, request.method, path);
-  const itemMatch = /^\/(?:Items|Videos|Audio|MediaSegments|Persons|Artists|Studios|Genres|MusicGenres|UserFavoriteItems|UserPlayedItems)\/([a-f0-9-]{32,36})(?:\/|$)/i.exec(path)
-    ?? /^\/Users\/[^/]+\/(?:Items|PlayedItems|FavoriteItems)\/([a-f0-9-]{32,36})(?:\/|$)/i.exec(path);
-  if (itemMatch) {
-    const bodySource = Object.entries(record(request.body)).find(([key]) => key.toLowerCase() === "mediasourceid")?.[1];
-    const source = [...query].find(([key]) => key.toLowerCase() === "mediasourceid")?.[1] ?? (typeof bodySource === "string" ? bodySource : undefined);
-    await service.requireItem(viewer, itemMatch[1]!, source);
+  if (session && !ownsCommunityProgress(service, viewer)) {
+    if (session[2] === "sync") return reply.send({ success: true });
+    body = {}; // Close a follower's stream without writing its stale progress.
   }
-  if (request.method === "POST" && /^\/Sessions\/Playing(?:\/(?:Progress|Stopped))?$/i.test(path)) {
-    const itemId = Object.entries(record(request.body)).find(([key]) => key.toLowerCase() === "itemid")?.[1];
-    if (typeof itemId === "string" && itemId) await service.requireItem(viewer, itemId);
+  if (session && (session[2] === "sync" || Object.keys(record(body)).length)) {
+    const input = record(body);
+    if (![input.currentTime, input.timeListened].every(value => typeof value === "number" && Number.isFinite(value) && value >= 0)
+      || Number(input.timeListened) > 86400 || Number(input.currentTime) > 365 * 86400) throw new NativeError("native_invalid_progress", 400);
+    body = { currentTime: input.currentTime, timeListened: input.timeListened,
+      ...(typeof input.duration === "number" && Number.isFinite(input.duration) && input.duration > 0 ? { duration: input.duration } : {}) };
   }
-  await service.authorize(viewer.capability);
   const controller = new AbortController();
   const abort = () => controller.abort();
   viewer.aborters.add(abort);
   request.raw.once("aborted", abort);
   reply.raw.once("close", abort);
-  const timeout = setTimeout(abort, 30_000);
-  timeout.unref();
-  const membership = setInterval(() => { void service.authorize(viewer.capability).catch(abort); }, 5_000);
-  membership.unref();
-  const dispose = () => {
-    clearTimeout(timeout); clearInterval(membership); viewer.aborters.delete(abort);
-    request.raw.off("aborted", abort); reply.raw.off("close", abort); abort();
-  };
+  const timeout = setTimeout(abort, 20_000);
+  let streaming = false;
+  const dispose = () => { clearTimeout(timeout); viewer.aborters.delete(abort); request.raw.off("aborted", abort); reply.raw.off("close", abort); };
   try {
-    const target = nativeRequestTarget(viewer, path, query);
     const headers: Record<string, string> = { Authorization: nativeAuthorization(viewer) };
-    if (typeof request.headers.range === "string") headers.Range = request.headers.range;
-    const body = ["GET", "HEAD"].includes(request.method) ? undefined : nativeRequestBody(service, viewer, path, request.body);
+    if (request.headers.range) headers.Range = request.headers.range;
+    if (typeof request.headers["if-range"] === "string") headers["If-Range"] = request.headers["if-range"];
     if (body !== undefined) headers["Content-Type"] = "application/json";
-    const response = await service.dependencies.fetch(viewer.connection.target, target, {
-      method: request.method, headers, signal: controller.signal, ...(body === undefined ? {} : { body: JSON.stringify(body) })
-    });
+    const target = `${privateSessionPath(viewer, path)}${query.size ? `?${query}` : ""}`;
+    const response = await service.dependencies.fetch(viewer.connection.target, target, { method: request.method, headers, signal: controller.signal,
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
     clearTimeout(timeout);
+    if (!service.active(viewer)) { await response.body?.cancel(); throw new NativeError("native_session_expired", 401); }
     if (!response.ok) {
       await response.body?.cancel();
-      if (isNativeQueuePath(path)) {
-        request.log.warn({ code: "jellyfin_request_failed", upstreamStatus: response.status, ...nativeQueueShape(request) }, "Native queue request rejected by Jellyfin");
-      }
       if (response.status === 401) await service.revoke(viewer);
-      const status = response.status >= 400 && response.status <= 599 ? response.status : 502;
       if (response.status === 416 && response.headers.get("content-range")) reply.header("Content-Range", response.headers.get("content-range"));
-      dispose();
-      return reply.code(status).send({ error: { code: "jellyfin_request_failed", message: "Jellyfin could not complete this request." } });
+      return reply.code(response.status >= 400 && response.status < 600 ? response.status : 502).send({ error: { code: "audiobookshelf_request_failed", message: "Audiobookshelf could not complete this request." } });
+    }
+    if (session?.[2] === "close") {
+      const id = privateSessionId(viewer, session[1]!); if (id) viewer.playbackSessions.delete(id);
     }
     reply.code(response.status).header("Cache-Control", "no-store");
-    if (request.method === "HEAD" || response.status === 204) { await response.body?.cancel(); dispose(); return reply.send(); }
+    if (request.method === "HEAD" || response.status === 204) { await response.body?.cancel(); return reply.send(); }
     const contentType = response.headers.get("content-type") ?? "application/octet-stream";
     if (contentType.includes("json")) {
-      const text = await readBounded(response, MAX_JSON, controller.signal);
-      let value: unknown;
-      try { value = text ? JSON.parse(text) : null; } catch { throw new NativeError("native_invalid_json", 502); }
-      // Jellyfin sees the gateway's LAN connection, not the viewer's route
-      // through Discord. Native Web otherwise raises every bandwidth estimate
-      // to at least 140 Mbps, even when its end-to-end speed test is slower.
-      if (/^\/System\/Endpoint$/i.test(path)) value = { ...record(value), IsLocal: false, IsInNetwork: false };
-      if (/^\/Sessions$/i.test(path)) value = Array.isArray(value) ? value.filter((s) => record(s).Id === nativeSessionId(viewer)) : [];
-      const safe = sanitizeNativeJson(viewer, value);
-      dispose();
-      return sendNativeText(reply.type("application/json"), safe);
+      const value = await readUpstreamJson(response, MAX_JSON);
+      if (play) {
+        const id = record(value).id;
+        if (typeof id !== "string" || !matches(id, ID)) throw new NativeError("native_invalid_session", 502);
+        viewer.playbackSessions.clear();
+        viewer.playbackSessions.set(id, { itemId: play[1]!, ...(play[2] ? { episodeId: play[2] } : {}) });
+      }
+      return sendNativeText(reply.type("application/json"), sanitizeNativeJson(viewer, value));
     }
-    if (contentType.toLowerCase().includes("mpegurl") || path.endsWith(".m3u8")) {
-      const text = await readBounded(response, MAX_PLAYLIST, controller.signal);
-      const upstreamUrl = new URL(viewer.connection.serverUrl.replace(/\/$/, "") + target).href;
-      const rewritten = rewriteNativePlaylist(viewer, text, upstreamUrl);
-      dispose();
-      return sendNativeText(reply.type("application/vnd.apple.mpegurl"), rewritten);
+    if (/mpegurl/i.test(contentType) || path.endsWith(".m3u8")) {
+      const text = await boundedText(response, 2 * 1024 * 1024);
+      return sendNativeText(reply.type("application/vnd.apple.mpegurl"), rewriteNativePlaylist(viewer, text, upstreamUrl(viewer.connection.target, target).href));
     }
-    if (/(?:html|xml|svg|javascript|ecmascript)/i.test(contentType)) throw new NativeError("native_content_denied", 502);
+    if (/(?:html|xml|svg|javascript|ecmascript)/i.test(contentType)) { await response.body?.cancel(); throw new NativeError("native_content_denied", 502); }
     for (const header of ["content-type", "content-length", "content-range", "accept-ranges"]) {
       const value = response.headers.get(header); if (value) reply.header(header, value);
     }
-    if (!response.body) { dispose(); return reply.send(); }
+    if (!response.body) return reply.send();
     const source = Readable.fromWeb(response.body as unknown as NodeReadableStream, { signal: controller.signal });
     const stream = Readable.from((async function* () {
       try { for await (const chunk of nativeMediaChunks(source, nativeSegmentIdleTimeout(path))) { if (!service.active(viewer)) break; yield chunk; } }
-      catch (error) { throw error instanceof NativeError ? error : new NativeError("native_stream_interrupted", 502); }
       finally { source.destroy(); dispose(); }
     })());
     stream.once("close", () => { source.destroy(); dispose(); });
     stream.once("error", () => {
-      // Before any bytes leave, Fastify can still send its JSON error response.
-      // Headers copied from the media response must not frame that response.
       if (!reply.raw.headersSent) {
-        for (const header of ["content-length", "content-range", "accept-ranges"]) {
-          reply.removeHeader(header);
-          // Fastify may already have staged the stream headers on ServerResponse.
-          reply.raw.removeHeader(header);
-        }
-        reply.type("application/json");
-        reply.raw.setHeader("content-type", "application/json");
+        for (const header of ["content-length", "content-range", "accept-ranges"]) { reply.removeHeader(header); reply.raw.removeHeader(header); }
+        reply.type("application/json"); reply.raw.setHeader("content-type", "application/json");
       }
     });
+    // Keep abort hooks for the lifetime of the stream.
+    streaming = true;
     return reply.send(stream);
   } catch (error) {
-    dispose();
     if (error instanceof NativeError) throw error;
-    throw new NativeError("jellyfin_unavailable", 502);
+    throw new NativeError("audiobookshelf_unavailable", 502);
+  } finally {
+    if (!streaming) dispose();
   }
 }
 
-export type PreparedNativeSocket = { socket: WebSocket; pending: Array<{ raw: RawData; binary: boolean }>; capture: (raw: RawData, binary: boolean) => void };
-
-/** Establish the native metadata/reporting session before the browser opens. */
-export async function prepareNativeSocket(viewer: NativeViewer, signal?: AbortSignal): Promise<PreparedNativeSocket> {
-  const base = new URL(viewer.connection.serverUrl.replace(/\/$/, "") + "/socket");
-  base.protocol = base.protocol === "https:" ? "wss:" : "ws:";
-  const upstream = new WebSocket(base, {
-    ...upstreamWebSocketOptions(viewer.connection.target), headers: { Authorization: nativeAuthorization(viewer) },
-    followRedirects: false, handshakeTimeout: 15_000, maxPayload: MAX_JSON
-  });
-  const abort = () => upstream.terminate();
-  viewer.aborters.add(abort);
-  signal?.addEventListener("abort", abort, { once: true });
-  upstream.once("close", () => { viewer.aborters.delete(abort); signal?.removeEventListener("abort", abort); });
-  const pending: PreparedNativeSocket["pending"] = [];
-  const capture = (raw: RawData, binary: boolean) => {
-    if (pending.length < 8 && raw.toString().length <= MAX_JSON) pending.push({ raw, binary });
-    else upstream.terminate();
-  };
-  upstream.on("message", capture);
-  // Keep an error listener installed across the await/upgrade boundary.
-  upstream.on("error", () => { /* Errors become a generic upstream response or bridge closure. */ });
-  await new Promise<void>((resolve, reject) => {
-    upstream.once("open", resolve);
-    upstream.once("error", () => reject(new NativeError("native_socket_unavailable", 502)));
-    upstream.once("close", () => reject(new NativeError("native_socket_unavailable", 502)));
-  });
-  if (signal?.aborted || viewer.revoked) { upstream.terminate(); throw new NativeError("native_session_expired", 401); }
-  return { socket: upstream, pending, capture };
+async function boundedText(response: Response, limit: number): Promise<string> {
+  const reader = response.body?.getReader(); if (!reader) return "";
+  const chunks: Uint8Array[] = []; let bytes = 0;
+  try {
+    while (true) { const next = await reader.read(); if (next.done) break; bytes += next.value.length;
+      if (bytes > limit) throw new NativeError("native_playlist_too_large", 502); chunks.push(next.value); }
+    return Buffer.concat(chunks).toString("utf8");
+  } catch (error) { await reader.cancel().catch(() => undefined); throw error; }
 }
 
-/** Upgrade authentication occurs in the route preValidation, before this bridge exists. */
+export type PreparedNativeSocket = { socket: Socket };
+export async function prepareNativeSocket(viewer: NativeViewer, signal?: AbortSignal): Promise<PreparedNativeSocket> {
+  const base = new URL(viewer.connection.serverUrl);
+  // engine.io-client filters WebSocket options and silently drops lookup and
+  // servername. Its allowed `agent` option carries both through Node's transport.
+  // Each native socket owns its agent; credentials never live in agent options.
+  const Agent = base.protocol === "https:" ? HttpsAgent : HttpAgent;
+  const agent = new Agent({ ...upstreamWebSocketOptions(viewer.connection.target), keepAlive: false });
+  const upstream = io(base.origin, { path: `${base.pathname.replace(/\/$/, "")}/socket.io`, transports: ["websocket"],
+    forceNew: true, reconnection: false, autoConnect: false, timeout: 15_000,
+    transportOptions: { websocket: { agent, maxPayload: MAX_JSON } } });
+  const abort = () => { upstream.disconnect(); agent.destroy(); };
+  viewer.aborters.add(abort); signal?.addEventListener("abort", abort, { once: true });
+  upstream.once("disconnect", () => { agent.destroy(); viewer.aborters.delete(abort); signal?.removeEventListener("abort", abort); });
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new NativeError("native_socket_unavailable", 502)), 15_000);
+      const success = () => { clearTimeout(timeout); resolve(); };
+      const failure = () => { clearTimeout(timeout); reject(new NativeError("native_socket_unavailable", 502)); };
+      upstream.once("connect", () => upstream.emit("auth", viewer.connection.accessToken));
+      upstream.once("init", success); upstream.once("auth_failed", failure); upstream.once("connect_error", failure);
+      upstream.connect();
+    });
+    if (signal?.aborted || viewer.revoked) throw new NativeError("native_session_expired", 401);
+    return { socket: upstream };
+  } catch (error) { abort(); viewer.aborters.delete(abort); signal?.removeEventListener("abort", abort); throw error; }
+}
+
 export function bridgeNativeSocket(service: NativePartyService, viewer: NativeViewer, socket: WebSocket, prepared: PreparedNativeSocket): void {
-  const upstream = prepared.socket;
-  viewer.sockets += 1;
-  viewer.lastSocketClose = 0;
-  let ended = false;
-  let alive = true;
-  let playbackPending = 0;
-  let unsubscribePlayback: (() => void) | undefined;
-  const pending: string[] = [];
+  viewer.sockets++; viewer.lastSocketClose = 0;
+  let ended = false; let alive = true; let pending = 0; let unsubscribe: (() => void) | undefined;
   const stop = () => {
-    if (ended) return;
-    ended = true;
-    clearInterval(heartbeat);
-    unsubscribePlayback?.();
-    viewer.aborters.delete(stop);
-    upstream.terminate(); socket.terminate();
-    void service.socketDisconnected(viewer);
+    if (ended) return; ended = true; clearInterval(heartbeat); unsubscribe?.(); viewer.aborters.delete(stop);
+    prepared.socket.disconnect(); socket.terminate(); void service.socketDisconnected(viewer);
   };
   viewer.aborters.add(stop);
-  socket.on("pong", () => { alive = true; });
-  const heartbeat = setInterval(() => {
-    if (!alive || !service.active(viewer)) { stop(); return; }
-    alive = false; socket.ping();
-    void service.authorize(viewer.capability).catch(stop);
-  }, 15_000);
-  heartbeat.unref();
   const send = (MessageType: string, Data: unknown) => {
-    if (ended || socket.readyState !== WebSocket.OPEN || !service.active(viewer)) return;
+    if (ended || !service.active(viewer) || socket.readyState !== WebSocket.OPEN) return;
     if (socket.bufferedAmount > MAX_SOCKET_BUFFER) { stop(); return; }
     socket.send(JSON.stringify({ MessageType, Data }));
   };
-  const forward = (raw: RawData, binary: boolean) => {
-    if (binary || Buffer.byteLength(raw.toString()) > 65_536) { stop(); return; }
-    let message: unknown;
-    try { message = JSON.parse(raw.toString()); } catch { stop(); return; }
-    if (record(message).MessageType === "ActivityPlaybackCommand") {
-      // Bound retained command bodies while upstream permission checks are slow.
-      if (++playbackPending > 64) { stop(); return; }
-      const command = record(message).Data;
-      void service.playback.submit(viewer, command).then((state) => {
-        // New commands already broadcast to all viewers. Retries need their own acknowledgement.
-        if (state.ack?.duplicate) send("ActivityPlaybackState", state);
-      }).catch(async (error: unknown) => {
-        const code = error instanceof NativeError ? error.code : "activity_command_failed";
-        let state;
-        try { state = await service.playback.get(viewer); } catch { /* Denied accounts receive no snapshot. */ }
-        const id = record(command).id;
-        send("ActivityPlaybackError", { ...(typeof id === "string" && /^[a-zA-Z0-9_-]{1,64}$/.test(id) ? { id } : {}),
-          code, ...(state ?? { clientId: viewer.deviceId }) });
-        if (!service.active(viewer)) stop();
-      }).finally(() => { playbackPending--; });
-      return;
-    }
-    // Never subscribe to other sessions, scheduled tasks or administrative events.
-    if (!["KeepAlive", "Ping"].includes(String(record(message).MessageType))) return;
-    const text = JSON.stringify(message);
-    if (upstream.readyState === WebSocket.OPEN) upstream.send(text);
-    else if (pending.length < 8) pending.push(text);
-    else stop();
-  };
-  socket.on("message", forward);
+  const heartbeat = setInterval(() => {
+    if (!alive || !service.active(viewer)) { stop(); return; } alive = false; socket.ping();
+    void service.authorize(viewer.capability).catch(stop);
+  }, 15_000); heartbeat.unref();
+  socket.on("pong", () => { alive = true; });
   socket.on("close", stop); socket.on("error", stop);
-  upstream.on("error", stop); upstream.on("close", stop);
-  upstream.on("open", () => { for (const text of pending) upstream.send(text); pending.length = 0; });
-  const upstreamMessage = (raw: RawData, binary: boolean) => {
-    if (ended || binary || socket.readyState !== WebSocket.OPEN) return;
-    try {
-      const message: unknown = JSON.parse(raw.toString());
-      if (!service.observeMessage(viewer, message)) return;
-      if (socket.bufferedAmount > MAX_SOCKET_BUFFER) { stop(); return; }
-      socket.send(JSON.stringify(sanitizeNativeJson(viewer, message)));
-    } catch { stop(); }
-  };
-  upstream.off("message", prepared.capture);
-  upstream.on("message", upstreamMessage);
-  for (const { raw, binary } of prepared.pending) upstreamMessage(raw, binary);
-  prepared.pending.length = 0;
-  if (upstream.readyState !== WebSocket.OPEN) stop();
-  if (!ended) void service.playback.connect(viewer, (state) => send("ActivityPlaybackState", state)).then((unsubscribe) => {
-    if (ended) unsubscribe(); else unsubscribePlayback = unsubscribe;
-  }).catch((error: unknown) => {
-    send("ActivityPlaybackError", { code: error instanceof NativeError ? error.code : "activity_command_failed", clientId: viewer.deviceId });
-    stop();
+  prepared.socket.on("disconnect", stop);
+  prepared.socket.onAny((event: string, payload: unknown) => {
+    if (event === "user_updated" && record(payload).id === viewer.connection.audiobookshelfUserId) {
+      send("AudiobookshelfEvent", { event, payload: sanitizeNativeJson(viewer, payload) }); return;
+    }
+    if (["playlist_added", "playlist_updated", "playlist_removed"].includes(event) && record(payload).userId === viewer.connection.audiobookshelfUserId) {
+      send("AudiobookshelfEvent", { event, payload: sanitizeNativeJson(viewer, payload) }); return;
+    }
+    if (!["stream_reset", "stream_progress", "stream_error", "stream_ready"].includes(event)) return;
+    const id = record(payload).streamId ?? record(payload).id ?? record(payload).stream;
+    if (typeof id !== "string" || !viewer.playbackSessions.has(id)) return;
+    send("AudiobookshelfEvent", { event, payload: sanitizeNativeJson(viewer,
+      event === "stream_error" ? { id, error: "Audiobookshelf could not prepare this audio stream." } : payload) });
   });
+  socket.on("message", (raw: RawData, binary: boolean) => {
+    if (binary || Buffer.byteLength(raw.toString()) > 65_536) { stop(); return; }
+    let message: Record<string, unknown>; try { message = record(JSON.parse(raw.toString())); } catch { stop(); return; }
+    if (message.MessageType !== "ActivityPlaybackCommand") return;
+    if (++pending > 64) { stop(); return; }
+    void service.playback.submit(viewer, message.Data).then(state => { if (state.ack?.duplicate) send("ActivityPlaybackState", state); })
+      .catch(async (error: unknown) => {
+        let state; try { state = await service.playback.get(viewer); } catch { /* Revoked/denied viewers receive no state. */ }
+        const id = record(message.Data).id;
+        send("ActivityPlaybackError", { ...(typeof id === "string" && matches(id, ID) ? { id } : {}),
+          code: error instanceof NativeError ? error.code : "activity_command_failed", ...(state ?? { clientId: viewer.deviceId }) });
+        if (!service.active(viewer)) stop();
+      }).finally(() => { pending--; });
+  });
+  void service.playback.connect(viewer, state => send("ActivityPlaybackState", state)).then(cleanup => {
+    if (ended) cleanup(); else unsubscribe = cleanup;
+  }).catch(() => stop());
 }

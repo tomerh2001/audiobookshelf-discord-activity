@@ -1,10 +1,11 @@
 services:
   app:
-    image: ghcr.io/tomerh2001/jellyfin-discord-activity:latest
-    container_name: jellyfin-discord-activity
+    image: ${ACTIVITY_IMAGE:-audiobookshelf-discord-activity:local}
+    build: .
+    container_name: audiobookshelf-discord-activity
     env_file: .env
     environment:
-      # Writable log directory inside the container (host: ./logs/app)
+      # Writable log directory in the persistent app volume.
       LOG_DIR: /data/logs
     restart: unless-stopped
     volumes:
@@ -22,7 +23,7 @@ services:
 
   caddy:
     image: caddy:2-alpine
-    container_name: jellyfin-watch-caddy
+    container_name: audiobookshelf-listen-caddy
     restart: unless-stopped
     profiles:
       - proxy
@@ -31,7 +32,6 @@ services:
       - "443:443"
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
-      - ./logs/caddy:/var/log/caddy
       - caddy_data:/data
       - caddy_config:/config
     logging:

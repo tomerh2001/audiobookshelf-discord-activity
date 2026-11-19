@@ -22,18 +22,17 @@ beforeEach(() => {
   const env = loadEnv({ NODE_ENV: "test", DEV_AUTH_MOCK: "true", DATABASE_URL: "file:/tmp/unused-playback.db" });
   service = new NativePartyService(env, {
     resolve: vi.fn(async (_env, userId, connectionId) => ({ id: connectionId, serverId: "server", serverUrl: "https://fixture.invalid",
-      serverName: "Fixture", jellyfinUserId: userId, jellyfinUsername: userId, kind: "personal", createdAt: "", updatedAt: "",
-      accessToken: "fixture-token", target: {} } as NativeConnection)),
+      serverName: "Fixture", audiobookshelfUserId: userId, audiobookshelfUsername: userId, kind: "personal", createdAt: "", updatedAt: "",
+      accessToken: userId, target: {} } as NativeConnection)),
     current: vi.fn(), membership: vi.fn(async () => undefined),
     fetch: vi.fn(async (_target, path, options) => {
       upstreamPaths.push(path);
-      const device = /DeviceId="([^"]+)"/.exec(String((options?.headers as Record<string, string>).Authorization))?.[1] ?? "";
-      const owner = [...service.viewers.values()].find((viewer) => viewer.deviceId === device);
-      if (path === "/Users/Me") return Response.json({ Policy: { EnableMediaPlayback: !playbackDenied.has(owner?.discordUserId ?? "") } });
-      const item = /^\/Users\/([^/]+)\/Items\/([^?]+)/.exec(path);
+      const owner = String((options?.headers as Record<string, string>).Authorization).replace(/^Bearer /, "");
+      if (path === "/api/me") return Response.json({ isActive: !playbackDenied.has(owner) });
+      const item = /^\/api\/items\/([^?]+)/.exec(path);
       if (!item) throw new Error("Unexpected upstream request");
-      if (denied.has(`${item[1]}:${item[2]}`)) return Response.json({}, { status: 403 });
-      return Response.json({ Id: item[2], Name: "Fixture movie" });
+      if (denied.has(`${owner}:${item[1]}`)) return Response.json({}, { status: 403 });
+      return Response.json({ id: item[1], media: { metadata: { title: "Fixture audiobook" } } });
     })
   });
   coordinator = new ActivityPlaybackCoordinator(service, () => now);
@@ -79,6 +78,22 @@ describe("Activity playback authority", () => {
     now += 400;
     expect((await coordinator.get(second)).snapshot.positionTicks).toBe(12_000_000);
     expect(upstreamPaths.some((path) => path.startsWith("/SyncPlay"))).toBe(false);
+  });
+
+  it("shares audiobook speed without jumping the current timeline", async () => {
+    const first = (await viewer()).actor; const second = (await viewer("second")).actor;
+    await connect(first); const remote = await connect(second);
+    await coordinator.submit(first, await command(first, 1, queue()));
+    now += 2000;
+    await coordinator.submit(first, await command(first, 2, { type: "setPlaybackRate", playbackRate: 1.75 }));
+    expect(remote.states.at(-1)?.snapshot).toMatchObject({ playbackRate: 1.75, positionTicks: 20_000_000 });
+    now += 2000;
+    expect((await coordinator.get(second)).snapshot.positionTicks).toBe(55_000_000);
+    await coordinator.submit(first, await command(first, 3, { type: "setPlayback", paused: true }));
+    now += 2000;
+    expect((await coordinator.get(second)).snapshot.positionTicks).toBe(55_000_000);
+    await expect(coordinator.submit(first, { ...await command(first, 4, { type: "setPlaybackRate", playbackRate: 2 }), playbackRate: 0 }))
+      .rejects.toMatchObject({ code: "activity_invalid_command" });
   });
 
   it("deduplicates retry acknowledgements and rejects conflicting IDs and reordered older intent", async () => {

@@ -24,7 +24,7 @@ export async function registerDiscordCommands(applicationId: string, botToken: s
   }
   const existing = z.array(existingCommandSchema).parse(await (await request(`${base}/commands`)).json());
   const entry = existing.find((command) => command.type === 4);
-  const { id: _id, ...settings } = entry ?? { id: "", type: 4, name: "launch", description: "Open Jellyfin Watch in this channel",
+  const { id: _id, ...settings } = entry ?? { id: "", type: 4, name: "launch", description: "Open Audiobookshelf Listen in this channel",
     contexts: [0], integration_types: [0] };
   // Discord's default handler=2 also sends a public launch message. APP_HANDLER
   // delegates to our signed webhook, which returns LAUNCH_ACTIVITY without a follow-up.

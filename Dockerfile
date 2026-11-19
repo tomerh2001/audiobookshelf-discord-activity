@@ -1,7 +1,8 @@
 FROM node:24-alpine AS native
 RUN apk add --no-cache git
 WORKDIR /app
-COPY native-client ./native-client
+# The served source bundle includes the Activity integration's build inputs.
+COPY . .
 RUN node native-client/build.mjs
 
 FROM node:24-alpine AS deps

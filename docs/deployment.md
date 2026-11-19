@@ -1,80 +1,32 @@
 # Deployment
 
-The published container serves the Activity, REST API, WebSocket endpoint, and media proxy on port 3000. Use `ghcr.io/tomerh2001/jellyfin-discord-activity:latest`; GitHub Actions publishes it from `main` after checks pass.
+The application serves the native client, API, WebSocket and media gateway on port 3000. Deploy one instance with persistent `/data`; live sessions and room state are process-local, so a load-balanced multi-instance deployment is unsupported.
 
-## Configuration and storage
+## Build and configure
 
-Copy `.env.example` to an untracked `.env`. Fill in the Discord IDs, keys, allowlists, public HTTPS/WSS URLs, and Jellyfin account configuration. `PUBLIC_DISCORD_CLIENT_ID` must match `DISCORD_CLIENT_ID`. Production requires `DEV_AUTH_MOCK=false`. Generic connections use `JELLYFIN_ALLOW_CUSTOM_SERVERS=true` with public HTTPS/DNS restrictions.
+1. Copy `.env.example` to `.env`. Set `PUBLIC_BASE_URL` to your public HTTPS Activity origin and provide your own Discord application credentials.
+2. Generate a random `APP_SESSION_SECRET` and an independent base64-encoded 32-byte `TOKEN_ENCRYPTION_KEY`. Keep the encryption key with encrypted backups; losing it makes saved connections unreadable.
+3. Choose restricted or public Discord access. Configure Audiobookshelf and optional community credentials. Add Authentik's callback if using SSO.
+4. Run `docker compose up -d --build`. Confirm the container health check succeeds, then configure the Activity URL mapping and test from Discord.
 
-The container runs as an unprivileged user. Its UID/GID can be remapped with Compose `user:`. Mount a writable persistent volume at `/data`; `DATABASE_URL=file:/data/app.db` places `jellyfin-connections.sqlite` and its encrypted tokens there. Set `LOG_DIR=/data/logs` for file logging, or leave it empty for Docker logs only. App sessions and Activity playback timelines do not persist across service restart.
+The Compose file builds locally by default. For a registry release, set `ACTIVITY_IMAGE` and use `docker compose pull app` followed by `docker compose up -d --no-build app`. The provided GitHub workflow publishes a moving `latest` image on successful `main` builds; it does not contain an operator's repository name. Enroll that image in your normal updater if automatic updates are wanted.
 
-Backend secrets support Docker secret files (the edge secret is required only in Cloudflare Worker mode):
+## Reverse proxy and Discord
 
-```text
-DISCORD_CLIENT_SECRET_FILE=/run/secrets/discord_client_secret
-DISCORD_BOT_TOKEN_FILE=/run/secrets/discord_bot_token
-DISCORD_PROXY_EDGE_SECRET_FILE=/run/secrets/discord_proxy_edge_secret
-APP_SESSION_SECRET_FILE=/run/secrets/app_session_secret
-TOKEN_ENCRYPTION_KEY_FILE=/run/secrets/token_encryption_key
-JELLYFIN_SHARED_PASSWORD_FILE=/run/secrets/jellyfin_shared_password
-```
+Forward ordinary HTTP and WebSocket upgrades to the application. Do not cache authenticated responses or buffer whole audio streams. Preserve Range and If-Range requests. The backend sends no-store for API/media and private revalidation for packaged assets.
 
-Do not also set their plain environment equivalents. Use random secrets of at least 32 characters for app sessions, base64-encoded random 32 bytes for the token encryption key, and at least 32 random bytes encoded as hex or unpadded base64url for the optional edge secret. Keep files readable only by the service and administrators. Back up the encryption key with `/data`; changing it invalidates stored Jellyfin tokens.
+Production ingress requires Discord's signed proxy headers, or a separately verified edge that supplies `x-audiobookshelf-discord-edge`. An arbitrary client-supplied `CF-Worker`, Origin or Referer is not ingress proof. See [security](security.md). Your ingress must allow the exact OIDC external-start and callback routes; these routes enforce their own ticket, browser cookie, state and PKCE checks. Do not place a generic Authentik forward-auth login page in front of the entire Activity.
 
-Shared mode uses a dedicated non-admin Jellyfin user. Grant media playback, remuxing/transcoding, and only the intended movie/show libraries. Disable deletion, downloads, administration, and management. Do not mount Jellyfin's administrator key into this app.
+The Caddy profile is optional. Copy `Caddyfile.example` to `Caddyfile`, replace its example hostname, point DNS to your ingress and run `docker compose --profile proxy up -d`. Configure ingress proof at the actual trusted edge before production traffic.
 
-## HTTPS routing
+The Caddy example disables access logging because request URLs contain credentials. If you enable logs at any proxy, redact the capability segment in `/abs/<capability>/...`, remove OIDC callback and handoff query strings, and omit Authorization, Cookie, Set-Cookie and refresh-token headers before writing the record. API log redaction does not protect separate proxy or hosting-platform logs. Keep any retained logs private and bounded.
 
-Route one HTTPS hostname to the container's port 3000, preserving `/`, `/api`, `/jf`, `/jellyfin-web`, and `/assets`. Enable WebSocket upgrades. Map `/` in Discord's Activities URL Mappings to that hostname without a scheme.
+## Secrets and persistence
 
-Production ingress authentication is always enabled. `DISCORD_PROXY_AUTH_MODE=signature` is the default and requires Discord's optional signed proxy headers. Deployments supporting slash/right-click launch paths that omit those headers can explicitly select `cloudflare-worker` only after configuring the trusted Worker field, overwrite/removal Transform Rules and WAF described in [Security](security.md#cloudflare-worker-attestation). The app never trusts an ordinary `CF-Worker`, `Origin` or `Referer` header. Both modes preserve independent Discord interaction signatures and all OAuth, allowed-guild, Activity-instance and media-session checks.
+Sensitive variables support a matching `_FILE` path for Docker secrets; do not configure both the plain variable and its file. Keep local secret files outside the build context or in an excluded `secrets/` directory. The Docker ignore file excludes local environment files and common private-key containers; arbitrary `_FILE` paths are not automatically excluded. Persist `/data`, including the encrypted connections database. Application logs may be directed to `LOG_DIR`. Keep logs private and bounded. No media files are stored by the Activity; Audiobookshelf owns its media, transcodes and progress.
 
-Keep existing Authentik routing policies intact. The app has Discord OAuth and room authorization; it has no native Authentik OIDC or trusted-header login. A forward-auth middleware must preserve the app's `Authorization: Bearer` header. A service-local copy of the same Authentik middleware can omit only `Authorization` from its response-header list while keeping the login gate unchanged.
+The image runs as the unprivileged Node user. Its health check uses the direct loopback-only `/health` endpoint. Remote `/health` and protected routes cannot bypass ingress by presenting a forwarded loopback address.
 
-The Activity proxy and Discord webhook verifier cannot normally complete an interactive edge login. If this prevents use, an exact operator-approved routing decision is required. Do not silently exempt media, API, static, WebSocket, callback, or webhook routes.
+## Upgrade checks
 
-Media URLs contain temporary bearer capabilities. The app redacts them from request logs; configure reverse-proxy logs to omit sensitive URLs as well. Disable public caching of authenticated API and media responses.
-
-## Start and verify
-
-```bash
-docker compose pull
-docker compose up -d
-docker compose ps
-docker compose exec app node -e "fetch('http://127.0.0.1:3000/health').then(r=>r.json()).then(console.log)"
-```
-
-The image has a loopback healthcheck. Confirm direct public UI/config/health/media requests are denied, genuine ingress-authenticated Discord requests receive the built frontend, room/library requests still require app sessions, unsigned interactions return 401, and backend Jellyfin authentication succeeds. Check the HTTPS route separately from internal health; an edge redirect means Discord access remains unverified.
-
-Complete [Discord setup](discord-setup.md), register commands, and test the same Activity with two real Discord users. Verify video/audio, pause/seek synchronization, audio/subtitle choices, next/previous episode and reconnect behavior, logout revocation, and a restart. A healthcheck or unit test does not establish Discord client playback compatibility.
-
-## Updates
-
-Application changes go through a source branch, reviewed pull request, merge to `main`, and successful CI image publication. Pull the moving `latest` tag and recreate the container. Record the deployed OCI revision/digest when diagnosing changes. Do not deploy live source bind mounts or permanent locally built patches.
-
-The home-server provisioning input is [deploy/service-spec.yaml](../deploy/service-spec.yaml). Its generated operational Compose and environment files live in the host's Stacks repository; runtime credentials live in 1Password and the service's data dataset.
-
-After filling the reserved Discord fields in **Home Server → Jellyfin Discord Activity**, check and synchronize the existing home-server configuration with:
-
-```bash
-python3 deploy/configure-home-server.py --check
-python3 deploy/configure-home-server.py --apply
-```
-
-The helper resolves secrets without printing them, validates all required fields before writing, preserves the private TrueNAS ACL, and updates public IDs in the stack's `.env`. It does not start the service, edit ingress, or change Authentik policy.
-
-For the Cloudflare Worker mode, first create the concealed `discord_proxy_edge_secret` field in the same 1Password item and complete the edge proof rules. The stack must forward `DISCORD_PROXY_AUTH_MODE` and mount the new secret:
-
-```yaml
-environment:
-  DISCORD_PROXY_AUTH_MODE: ${DISCORD_PROXY_AUTH_MODE:-signature}
-  DISCORD_PROXY_EDGE_SECRET_FILE: /run/secrets/discord_proxy_edge_secret
-secrets:
-  - discord_proxy_edge_secret
-# At Compose top level:
-# secrets:
-#   discord_proxy_edge_secret:
-#     file: ${DATA_DATASET}/${SLUG}/.secrets/discord_proxy_edge_secret
-```
-
-Run `python3 deploy/configure-home-server.py --check --proxy-auth-mode cloudflare-worker`, then the same command with `--apply`. The helper validates and installs the additional secret and records the selected mode. Later invocations without `--proxy-auth-mode` preserve the stack's recorded mode. Signature-only deployments do not require the additional secret. Deploy the reviewed, CI-published image only after the edge rules and private secret mount are ready; changing the mode is a deliberate operational action, never an automatic response to failed signatures.
+Run the full CI suite and native build before release. Verify login, two-user synchronization, account switching, token refresh, range seeking and OIDC with your configured provider. Restarting the app requires users to reopen their Activity; saved connections survive. Keep a database backup before changing the encryption key or database format.

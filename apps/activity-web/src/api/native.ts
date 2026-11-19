@@ -5,12 +5,12 @@ import { notifySessionRejected } from "./sessionRecovery.js";
 
 const connectionSchema = z.object({
   id: z.string(), serverUrl: z.string(), serverId: z.string(), serverName: z.string(),
-  jellyfinUserId: z.string(), jellyfinUsername: z.string(), kind: z.enum(["personal", "community"]),
+  audiobookshelfUserId: z.string(), audiobookshelfUsername: z.string(), kind: z.enum(["personal", "community"]),
   createdAt: z.string(), updatedAt: z.string()
 });
 export type Connection = z.infer<typeof connectionSchema>;
 const connectionsSchema = z.object({
-  connections: z.array(connectionSchema), defaultServerUrl: z.string(), canonicalDefaultServerUrl: z.string(), communityAvailable: z.boolean(),
+  connections: z.array(connectionSchema), defaultServerUrl: z.string(), canonicalDefaultServerUrl: z.string(), communityAvailable: z.boolean(), oidcEnabled: z.boolean().default(false),
   preferredConnectionId: z.string().nullable()
 });
 export type Connections = z.infer<typeof connectionsSchema>;
@@ -23,13 +23,13 @@ export function matchesPartyServer(connection: Connection, party: Party) {
   return connection.serverId === party.serverId && connection.serverUrl === party.serverUrl;
 }
 export const nativeLaunchSchema = z.object({
-  baseUrl: z.string().regex(/^\/jf\/[a-zA-Z0-9_-]+$/), accessToken: z.string().min(1),
+  baseUrl: z.string().regex(/^\/abs\/[a-zA-Z0-9_-]+$/), accessToken: z.string().min(1),
   userId: z.string().min(1), serverId: z.string().min(1), deviceId: z.string().min(1), groupId: z.string().min(1),
   restoreRoute: z.string().nullable()
 });
 export type NativeLaunch = z.infer<typeof nativeLaunchSchema>;
-const quickConnectSchema = z.object({ id: z.string(), code: z.string(), expiresAt: z.string() });
-export type QuickConnect = z.infer<typeof quickConnectSchema>;
+const oidcSchema = z.object({ id: z.string(), url: z.string().url(), expiresAt: z.string() });
+export type OidcLogin = z.infer<typeof oidcSchema>;
 
 async function request(path: string, token: string, method = "GET", body?: unknown, signal?: AbortSignal, keepalive = false): Promise<unknown> {
   return withRequestTimeout(signal, 40_000, async requestSignal => {
@@ -89,10 +89,10 @@ export async function launchNative(token: string, connectionId: string, deviceId
 export async function saveNativeRestore(token: string, connectionId: string, route: string, sequence: number, keepalive = false) {
   await request("/api/native/restore", token, "PUT", { connectionId, route, sequence }, undefined, keepalive);
 }
-export async function startQuickConnect(token: string, serverUrl: string) {
-  return quickConnectSchema.parse(await request("/api/connections/quick-connect", token, "POST", { serverUrl }));
+export async function startOidcLogin(token: string, serverUrl: string) {
+  return oidcSchema.parse(await request("/api/connections/oidc", token, "POST", { serverUrl }));
 }
-export async function pollQuickConnect(token: string, id: string, signal?: AbortSignal) {
-  return z.discriminatedUnion("status", [z.object({ status: z.literal("pending") }), z.object({ status: z.literal("connected"), connection: connectionSchema })])
-    .parse(await request(`/api/connections/quick-connect/${encodeURIComponent(id)}/poll`, token, "POST", undefined, signal));
+export async function pollOidcLogin(token: string, id: string, signal?: AbortSignal) {
+  return z.discriminatedUnion("status", [z.object({ status: z.literal("pending") }), z.object({ status: z.literal("connected"), connection: connectionSchema }), z.object({ status: z.literal("failed"), message: z.string() })])
+    .parse(await request(`/api/connections/oidc/${encodeURIComponent(id)}/poll`, token, "POST", undefined, signal));
 }

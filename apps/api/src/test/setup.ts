@@ -4,7 +4,7 @@ import path from "node:path";
 import { afterAll, vi } from "vitest";
 
 // Each test worker has a disposable database, including tests that only exercise /api/me.
-const directory = mkdtempSync(path.join(tmpdir(), "jellyfin-watch-tests-"));
+const directory = mkdtempSync(path.join(tmpdir(), "audiobookshelf-watch-tests-"));
 vi.mock("../env.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../env.js")>();
   return { ...actual, loadEnv: (input: NodeJS.ProcessEnv = process.env) =>

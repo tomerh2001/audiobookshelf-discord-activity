@@ -1,9 +1,8 @@
 # Native document session library
 
 This package builds `dist/activity-session.js`, a browser IIFE exposing
-`window.JellyfinWatch`. Load it once as a classic script before the native Jellyfin
-adapter initializes. Evaluating it does not create a view, iframe, SDK connection
-or API request. Jellyfin owns the document and its controls.
+`window.AudiobookshelfWatch`. Load it once as a classic script before the native Audiobookshelf
+adapter initializes. It creates no view or iframe. Inside a Discord frame, it overlaps one deduplicated SDK handshake with native loading. Audiobookshelf owns the document and its controls.
 
 The facade keeps the existing authenticated broker API:
 
@@ -17,15 +16,15 @@ The facade keeps the existing authenticated broker API:
 | `getParty` | `(appToken, signal?)`; returns the current party or `null`. |
 | `joinParty` | `(appToken, connectionId)`; explicitly binds the party. |
 | `launchNative` | `(appToken, connectionId, deviceId)`; returns the opaque gateway launch including `restoreRoute: string \| null`. |
-| `normalizeNativeRoute` | `(value, serverId)`; returns an allowed native browsing hash or `null`. |
+| `normalizeNativeRoute` | `(value, serverId)`; returns an allowed native browsing path or `null`. |
 | `saveNativeRestore` | `(appToken, connectionId, route, sequence, keepalive?)`; saves transient navigation for the current viewer. |
 | `matchesPartyServer` | `(connection, party)`; checks both server ID and URL. |
 | `savePreference` | `(appToken, connectionId)`. |
 | `connectAccount` | `(appToken, {serverUrl, username, password})`; returns the saved connection. |
 | `connectCommunity` | `(appToken)`; returns the community connection when permitted. |
 | `deleteConnection` | `(appToken, connectionId)`. |
-| `startQuickConnect` | `(appToken, serverUrl)`; returns `{id, code, expiresAt}`. |
-| `pollQuickConnect` | `(appToken, id, signal?)`; returns pending or connected status. |
+| `startOidcLogin` | `(appToken, serverUrl)`; returns `{id, url, expiresAt}` for an external sign-in. |
+| `pollOidcLogin` | `(appToken, id, signal?)`; returns pending, connected or failed status. |
 | `onSessionRejected` | `(callback)`; callback receives the rejected app token only for `invalid_app_token` responses. Returns teardown. |
 | `closeDiscordActivity` | `(discord)`; closes the Activity SDK connection. |
 | `getConnectedParticipants` | `(discord)`; returns current Activity participants. |
@@ -36,7 +35,7 @@ a small preview; a normal portrait phone retains the focused layout. Observation
 does not change authentication, playback, orientation, or window fullscreen.
 
 Tokens stay in document memory. Credentials are submitted to authenticated broker
-endpoints, and native launches must use an opaque same-origin `/jf/…` path. The
+endpoints, and native launches must use an opaque same-origin `/abs/…` path. The
 native adapter must unsubscribe and dispose its session when leaving, suppress
 recovery once logout starts, and limit automatic recovery to prevent retry loops.
 Navigation restoration lives in bounded server memory and requires a newly
@@ -45,8 +44,7 @@ browser storage or bypass the fresh window's SDK handshake. A monotonically
 increasing checkpoint sequence prevents late requests from restoring an older
 page; a new launch replaces the writer identity.
 
-Use `pnpm --filter @app/activity-web build` to produce the library and branding
-assets. `dev` watches the library build for the API server to serve; it does not
+Use `pnpm --filter @app/activity-web build` to produce the library. `dev` watches the library build for the API server to serve; it does not
 run a separate UI. Run this package's `test`, `typecheck`, and `lint` commands for
 its session, API and layout checks. `jsdom` remains a development dependency for
 both these tests and the native document lifecycle regression test.

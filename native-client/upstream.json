@@ -1,7 +1,7 @@
 {
-  "repository": "https://github.com/jellyfin/jellyfin-web",
-  "version": "12.0.0",
-  "commit": "0e83c6a724b31f3e9b5a499244331a288c060a4a",
-  "archiveSha256": "8755b526a28175bde8f8db0c3761e30790bb488be75332447b8642bfb9618717",
-  "license": "GPL-2.0-or-later"
+  "repository": "https://github.com/advplyr/audiobookshelf",
+  "version": "2.38.0",
+  "commit": "1430c9fc642d586ff91c8d4cbed20aab2c47e473",
+  "archiveSha256": "91eef86158663183c224fb90c158a7cc6567dbc73eef9f748707667b41a21b84",
+  "license": "GPL-3.0-only"
 }

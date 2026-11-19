@@ -4,8 +4,21 @@ dist
 **/dist
 native-client/.build
 coverage
-.env
-.env.local
+# Local deployment environments and Docker secret inputs must not enter layers.
+.env*
+**/.env*
+!.env.example
+!**/.env.example
+secrets
+**/secrets
+.secret*
+**/.secret*
+*.key
+**/*.key
+*.p12
+**/*.p12
+*.pfx
+**/*.pfx
 data
 logs
 .git

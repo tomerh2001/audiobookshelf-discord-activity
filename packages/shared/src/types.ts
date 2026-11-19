@@ -28,7 +28,7 @@ export const discordExchangeResponseSchema = z.object({
 
 export const meResponseSchema = z.object({
   discordUser: discordUserSchema,
-  jellyfinLinked: z.boolean(),
+  audiobookshelfLinked: z.boolean(),
   discordContext: discordContextSchema.optional(),
   appSessionExpiresAt: z.string().datetime()
 });

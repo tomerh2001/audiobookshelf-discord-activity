@@ -1,7 +1,7 @@
 import type { DiscordSDK } from "@discord/embedded-app-sdk";
 import type { ActivityDiscordContext } from "./sdk.js";
 
-/** Deliberately excludes Jellyfin server addresses, identifiers and credentials. */
+/** Deliberately excludes Audiobookshelf server addresses, identifiers and credentials. */
 export type WatchSnapshot = {
   kind: "episode" | "movie" | "audio" | "video";
   title: string;
@@ -88,7 +88,7 @@ export function formatWatchActivity(snapshot: WatchSnapshot, now: number, iconUr
 
 function applicationIcon(context: ActivityDiscordContext): string | undefined {
   const app = context.application;
-  // Public Discord artwork only. Never publish protected Jellyfin artwork URLs.
+  // Public Discord artwork only. Never publish protected Audiobookshelf artwork URLs.
   return app && /^\d{1,30}$/.test(app.id) && /^(?:a_)?[a-f\d]{32}$/.test(app.icon ?? "")
     ? `https://cdn.discordapp.com/app-icons/${app.id}/${app.icon}.png` : undefined;
 }

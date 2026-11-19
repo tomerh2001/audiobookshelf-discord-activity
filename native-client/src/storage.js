@@ -39,8 +39,7 @@
     for (const name of ['localStorage', 'sessionStorage']) {
         Object.defineProperty(host, name, { configurable: true, enumerable: true, value: memoryStorage() });
     }
-    // jellyfin-apiclient opens its optional persistent response cache at import
-    // time and does not catch an asynchronous policy rejection. Disable caching
-    // rather than persist authenticated Jellyfin responses outside this session.
+    // Disable persistent response caching inside Discord. Authenticated native
+    // content and credentials belong only to this document.
     Object.defineProperty(host, 'caches', { configurable: true, enumerable: true, value: undefined });
 })(window);

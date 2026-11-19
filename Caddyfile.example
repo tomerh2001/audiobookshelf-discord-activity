@@ -1,17 +1,8 @@
-# Example production Caddy config with file logging.
-# Copy to Caddyfile and adjust the hostname.
-# Access logs land in ./logs/caddy when using docker compose --profile proxy.
+# Copy to Caddyfile and replace the hostname.
+# Access logging is disabled: request URIs contain playback capabilities and
+# OIDC codes/tickets. See docs/deployment.md before enabling proxy access logs.
 
-watch.example.com {
+listen.example.com {
 	encode zstd gzip
 	reverse_proxy app:3000
-
-	log {
-		output file /var/log/caddy/access.log {
-			roll_size 20mb
-			roll_keep 5
-			roll_keep_for 168h
-		}
-		format json
-	}
 }

@@ -1,9 +1,10 @@
 import { z } from "zod";
 
 const sequence = z.number().int().min(0).max(Number.MAX_SAFE_INTEGER);
-const ticks = z.number().int().min(0).max(7 * 86400 * 10_000_000);
+// Whole-book time, including multi-file books; up to one year in safe integer ticks.
+const ticks = z.number().int().min(0).max(365 * 86400 * 10_000_000);
 const identifier = z.string().regex(/^[a-zA-Z0-9_-]{1,64}$/);
-export const activityQueueEntrySchema = z.object({ id: identifier, itemId: z.string().regex(/^[a-fA-F0-9-]{32,36}$/) }).strict();
+export const activityQueueEntrySchema = z.object({ id: identifier, itemId: identifier, episodeId: identifier.optional() }).strict();
 const queue = z.array(activityQueueEntrySchema).max(500);
 const repeatMode = z.enum(["RepeatNone", "RepeatOne", "RepeatAll"]);
 const envelope = z.object({ epoch: identifier, id: identifier, sequence: sequence.min(1),
@@ -15,6 +16,7 @@ export const activityPlaybackCommandSchema = z.discriminatedUnion("type", [
   envelope.extend({ type: z.literal("seek"), positionTicks: ticks, paused: z.boolean() }).strict(),
   envelope.extend({ type: z.literal("select"), queueItemId: identifier, positionTicks: ticks, paused: z.boolean() }).strict(),
   envelope.extend({ type: z.literal("setRepeatMode"), repeatMode }).strict(),
+  envelope.extend({ type: z.literal("setPlaybackRate"), playbackRate: z.number().min(0.5).max(3) }).strict(),
   envelope.extend({ type: z.literal("stop") }).strict()
 ]);
 export type ActivityPlaybackCommand = z.infer<typeof activityPlaybackCommandSchema>;
@@ -22,6 +24,7 @@ export type ActivityQueueEntry = z.infer<typeof activityQueueEntrySchema>;
 export type ActivityPlaybackSnapshot = {
   epoch: string; revision: number; queueRevision: number; queue: ActivityQueueEntry[];
   index: number; positionTicks: number; paused: boolean; serverTimeMs: number;
+  playbackRate: number;
   repeatMode: z.infer<typeof repeatMode>;
   command?: { id: string; clientId: string; sequence: number; type: ActivityPlaybackCommand["type"] };
 };

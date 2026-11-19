@@ -3,8 +3,8 @@ const base = (process.env.SMOKE_BASE_URL ?? "http://localhost:3000").replace(/\/
 const health = await fetch(`${base}/health`);
 if (!health.ok || (await health.json() as { ok?: boolean }).ok !== true) throw new Error("Local health check failed.");
 const proof: Record<string, string> = {};
-if (process.env.SMOKE_EDGE_SECRET) proof["x-jellyfin-discord-edge"] = process.env.SMOKE_EDGE_SECRET;
-for (const endpoint of ["/api/me", "/api/connections", "/jf/invalid/System/Info/Public"]) {
+if (process.env.SMOKE_EDGE_SECRET) proof["x-audiobookshelf-discord-edge"] = process.env.SMOKE_EDGE_SECRET;
+for (const endpoint of ["/api/me", "/api/connections", "/abs/invalid/api/me"]) {
   const response = await fetch(base + endpoint, { headers: proof });
   if (response.status !== 401) throw new Error(`Authorization check failed (${response.status}).`);
   await response.body?.cancel();

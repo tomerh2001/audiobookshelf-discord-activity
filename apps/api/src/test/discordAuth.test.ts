@@ -87,7 +87,7 @@ describe("Discord auth routes", () => {
         id: "dev-user-host",
         username: "DevHost"
       },
-      jellyfinLinked: false,
+      audiobookshelfLinked: false,
       discordContext: {
         instanceId: "instance-1"
       }
